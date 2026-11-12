@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+export LC_ALL=C.UTF-8
+
+sink=@DEFAULT_AUDIO_SINK@
+source=@DEFAULT_AUDIO_SOURCE@
+
+volume_state() {
+    /usr/bin/wpctl get-volume "$1" 2>/dev/null | /usr/bin/awk '
+        $1 == "Volume:" && $2 ~ /^[0-9]+([.][0-9]+)?$/ {
+            percent = int($2 * 100 + 0.5)
+            if (percent > 100) percent = 100
+            print percent, ($3 == "[MUTED]" ? 1 : 0)
+            found = 1
+            exit
+        }
+        END { if (!found) exit 1 }'
+}
+
+osd() {
+    /usr/bin/qdbus6 org.kde.plasmashell /org/kde/osdService \
+        "org.kde.osdService.$1" "$2" >/dev/null
+}
+
+play_volume_feedback() {
+    /usr/bin/kreadconfig6 --file plasmaparc --group General \
+        --key AudioFeedback --default true --type bool || return 0
+
+    theme=$(/usr/bin/kreadconfig6 --file kdeglobals --group Sounds --key Theme --default ocean)
+    case "$theme" in ''|*[!A-Za-z0-9_-]*) theme=ocean ;; esac
+    sound="/usr/share/sounds/$theme/stereo/audio-volume-change.oga"
+    if [ ! -r "$sound" ]; then
+        sound=/usr/share/sounds/freedesktop/stereo/audio-volume-change.oga
+    fi
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 0
+
+    # Keep the renderer's action within its deadline and avoid overlapping sounds.
+    /usr/bin/flock -n "$XDG_RUNTIME_DIR/t1bridge-volume-feedback.lock" \
+        /usr/bin/timeout 2s /usr/bin/paplay --property=media.role=event "$sound" \
+        </dev/null >/dev/null 2>&1 &
+}
+
+show_volume() {
+    state=$(volume_state "$sink") || return 0
+    read -r percent muted <<EOF_STATE
+$state
+EOF_STATE
+    if [ "$muted" -eq 1 ]; then
+        percent=0
+    fi
+    osd volumeChanged "$percent" || true
+    if [ "${1:-}" = feedback ] && [ "$percent" -gt 0 ]; then
+        play_volume_feedback
+    fi
+}
+
+show_brightness() {
+    percent=$(/usr/bin/timeout -k 0.1s 0.3s /usr/local/bin/t1-touchbar-kde \
+        --brightness-percent "$1") || return 0
+    osd "$2" "$percent"
+}
+
+[ "${1:-}" = v1 ] || exit 2
+case "${2:-}" in
+    status)
+        capabilities=8
+        if [ -x /usr/bin/playerctl ] &&
+           players=$(/usr/bin/playerctl --list-all 2>/dev/null) &&
+           [ -n "$players" ]; then
+            capabilities=$((capabilities | 2))
+        fi
+        if state=$(volume_state "$sink"); then
+            printf 'T1BRIDGE-DESKTOP 1 %s %s\n' "$((capabilities | 1))" "$state"
+        else
+            printf 'T1BRIDGE-DESKTOP 1 %s - -\n' "$capabilities"
+        fi
+        ;;
+    set-volume|set-volume-preview)
+        [ "$#" -eq 3 ] || exit 2
+        case "$3" in ''|*[!0-9]*) exit 2 ;; esac
+        [ "$3" -le 100 ] || exit 2
+        /usr/bin/wpctl set-volume "$sink" "$3%" >/dev/null
+        if [ "$2" = set-volume ]; then
+            show_volume feedback
+        fi
+        ;;
+    toggle-mute)
+        /usr/bin/wpctl set-mute "$sink" toggle >/dev/null
+        show_volume
+        ;;
+    microphone-muted)
+        [ "$#" -eq 2 ] || exit 2
+        state=$(volume_state "$source") || exit 1
+        printf '%s\n' "${state##* }"
+        ;;
+    lesson-status)
+        [ "$#" -eq 2 ] || exit 2
+        status_command=${T1BRIDGE_STATUS_COMMAND:-}
+        case "$status_command" in /*) ;; *) exit 1 ;; esac
+        [ -f "$status_command" ] && [ -x "$status_command" ] || exit 1
+        exec "$status_command"
+        ;;
+    toggle-microphone-mute)
+        [ "$#" -eq 2 ] || exit 2
+        /usr/bin/wpctl set-mute "$source" toggle >/dev/null
+        if state=$(volume_state "$source"); then
+            percent=${state% *}
+            if [ "${state##* }" -eq 1 ]; then
+                percent=0
+            fi
+            osd microphoneVolumeChanged "$percent" || true
+        fi
+        ;;
+    media-previous|media-play-pause|media-next)
+        [ "$#" -eq 2 ] || exit 2
+        [ -x /usr/bin/playerctl ] || exit 1
+        /usr/bin/playerctl "${2#media-}" >/dev/null 2>&1
+        ;;
+    show-display-brightness)
+        show_brightness display brightnessChanged
+        ;;
+    show-keyboard-backlight)
+        show_brightness keyboard keyboardBrightnessChanged
+        ;;
+    *) exit 2 ;;
+esac

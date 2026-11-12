@@ -1,0 +1,3315 @@
+diff --git a/crates/t1-platform/src/system_brightness.rs b/crates/t1-platform/src/system_brightness.rs
+index 23e9591..7719b78 100644
+--- a/crates/t1-platform/src/system_brightness.rs
++++ b/crates/t1-platform/src/system_brightness.rs
+@@ -121,6 +121,25 @@ impl SystemBrightnessControls {
+         }
+     }
+ 
++    /// Reads the live display or keyboard level from the discovered endpoint.
++    ///
++    /// # Errors
++    /// Returns a static category if the endpoint or its readback is unavailable
++    /// or invalid.
++    pub fn current_percentage(&self, kind: BrightnessKind) -> Result<u8, BrightnessError> {
++        let device = self.device(kind)?;
++        let current = match kind {
++            BrightnessKind::Display => {
++                read_attribute(&device.brightness_path.with_file_name("actual_brightness"))?
++            }
++            BrightnessKind::Keyboard => read_attribute(&device.brightness_path)?,
++        };
++        let maximum = u64::from(device.maximum);
++        let current = u64::from(current.min(device.maximum));
++        u8::try_from((current * 100 + maximum / 2) / maximum)
++            .map_err(|_| BrightnessError::InvalidAttribute)
++    }
++
+     /// Scales an absolute percentage for one already-discovered fixed class.
+     ///
+     /// # Errors
+@@ -148,8 +167,7 @@ impl SystemBrightnessControls {
+     }
+ 
+     /// Reads the current hardware value and moves it by one of sixteen bounded
+-    /// steps. The privileged service owns this read so renderers need no sysfs
+-    /// access and cannot race a stale cached level into an absolute write.
++    /// steps. The privileged service reads the value when applying the action.
+     ///
+     /// # Errors
+     ///
+@@ -318,6 +336,35 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn reads_rounded_levels_from_each_discovered_endpoint() {
++        let tree = TestTree::new();
++        let displays = tree.class("backlight");
++        let leds = tree.class("leds");
++        let display = add_device(&displays, "display-device", "90\n");
++        let keyboard = add_device(&leds, "controller:white:kbd_backlight", "255\n");
++        fs::write(display.join("actual_brightness"), "17\n").unwrap();
++        fs::write(keyboard.join("brightness"), "233\n").unwrap();
++
++        let controls = SystemBrightnessControls::discover_in(&displays, &leds);
++        assert_eq!(controls.current_percentage(BrightnessKind::Display), Ok(19));
++        assert_eq!(
++            controls.current_percentage(BrightnessKind::Keyboard),
++            Ok(91)
++        );
++
++        fs::write(display.join("actual_brightness"), "95\n").unwrap();
++        assert_eq!(
++            controls.current_percentage(BrightnessKind::Display),
++            Ok(100)
++        );
++        fs::remove_file(display.join("actual_brightness")).unwrap();
++        assert_eq!(
++            controls.current_percentage(BrightnessKind::Display),
++            Err(BrightnessError::Io)
++        );
++    }
++
+     #[test]
+     fn absent_or_ambiguous_class_disables_only_that_control() {
+         let tree = TestTree::new();
+diff --git a/crates/t1-touchbar/Cargo.toml b/crates/t1-touchbar/Cargo.toml
+index 32669af..9f10836 100644
+--- a/crates/t1-touchbar/Cargo.toml
++++ b/crates/t1-touchbar/Cargo.toml
+@@ -20,7 +20,7 @@ path = "tests/desktop_provider.rs"
+ required-features = ["provider-test-fixture"]
+ 
+ [dependencies]
+-t1-platform = { path = "../t1-platform", version = "=0.0.0", default-features = false, features = ["frame-memfd", "seqpacket"] }
++t1-platform = { path = "../t1-platform", version = "=0.0.0", default-features = false, features = ["frame-memfd", "seqpacket", "system-brightness"] }
+ t1-touchbar-hw = { path = "../t1-touchbar-hw", version = "=0.0.0", default-features = false }
+ 
+ [lints]
+diff --git a/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
+new file mode 100644
+index 0000000..0c1a601
+--- /dev/null
++++ b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
+@@ -0,0 +1,99 @@
++use std::env;
++use std::fs::File;
++use std::io::{BufWriter, Write};
++use std::path::Path;
++use std::process::ExitCode;
++
++use t1_platform::system_brightness::{BrightnessKind, SystemBrightnessControls};
++use t1_touchbar::builtin_renderer;
++use t1_touchbar::desktop_provider::{PROVIDER_ENVIRONMENT, resolve_provider_path};
++use t1_touchbar::framebuffer::Xrgb8888Frame;
++use t1_touchbar::stock_slice::{SliderControl, StockBar, StockCapabilities, StockLevels};
++
++fn main() -> ExitCode {
++    let arguments: Vec<_> = env::args_os().skip(1).collect();
++    match arguments.as_slice() {
++        [] => {
++            let value = env::var_os(PROVIDER_ENVIRONMENT);
++            let provider = resolve_provider_path(value.as_deref());
++            builtin_renderer::run_extended_forever(provider.as_deref());
++            ExitCode::SUCCESS
++        }
++        [option, kind] if option == "--brightness-percent" => {
++            let kind = match kind.to_str() {
++                Some("display") => BrightnessKind::Display,
++                Some("keyboard") => BrightnessKind::Keyboard,
++                _ => return usage(),
++            };
++            let Ok(percentage) = SystemBrightnessControls::discover().current_percentage(kind)
++            else {
++                return ExitCode::FAILURE;
++            };
++            println!("{percentage}");
++            ExitCode::SUCCESS
++        }
++        [option, mode, destination] if option == "--preview" => {
++            let (fn_held, tools, slider) = match mode.to_str() {
++                Some("main") => (false, false, None),
++                Some("tools") => (false, true, None),
++                Some("keyboard") => (false, false, Some(SliderControl::KeyboardBacklight)),
++                Some("volume") => (false, false, Some(SliderControl::Volume)),
++                Some("function") => (true, false, None),
++                _ => return usage(),
++            };
++            match write_preview(Path::new(destination), fn_held, tools, slider) {
++                Ok(()) => ExitCode::SUCCESS,
++                Err(error) => {
++                    eprintln!("t1-touchbar-kde: preview: {error}");
++                    ExitCode::FAILURE
++                }
++            }
++        }
++        _ => usage(),
++    }
++}
++
++fn write_preview(
++    destination: &Path,
++    fn_held: bool,
++    tools: bool,
++    slider: Option<SliderControl>,
++) -> Result<(), Box<dyn std::error::Error>> {
++    const WIDTH: u32 = 2_170;
++    const HEIGHT: u32 = 60;
++    let capabilities = StockCapabilities::EXTENDED_CONTROLS
++        | StockCapabilities::DISPLAY_BRIGHTNESS
++        | StockCapabilities::KEYBOARD_BACKLIGHT
++        | StockCapabilities::AUDIO
++        | StockCapabilities::MEDIA;
++    let bar = StockBar::new(WIDTH, HEIGHT, capabilities)?
++        .with_tools(tools)
++        .with_open_slider(slider);
++    let levels = StockLevels {
++        display_brightness: Some(64),
++        keyboard_backlight: Some(45),
++        volume: Some(38),
++        microphone_muted: Some(false),
++        cpu_temperature: Some(52),
++        cpu_cores: [Some(18), Some(27)],
++        ..StockLevels::default()
++    };
++    let mut pixels = vec![0; (WIDTH * HEIGHT * 4) as usize];
++    let mut frame = Xrgb8888Frame::new(WIDTH, HEIGHT, WIDTH * 4, &mut pixels)?;
++    bar.render(&mut frame, fn_held, levels)?;
++
++    let mut output = BufWriter::new(File::create_new(destination)?);
++    write!(output, "P6\n{WIDTH} {HEIGHT}\n255\n")?;
++    for &[blue, green, red, _] in frame.as_bytes().as_chunks::<4>().0 {
++        output.write_all(&[red, green, blue])?;
++    }
++    output.flush()?;
++    Ok(())
++}
++
++fn usage() -> ExitCode {
++    eprintln!(
++        "usage: t1-touchbar-kde [--brightness-percent display|keyboard]\n       t1-touchbar-kde --preview main|tools|keyboard|volume|function OUTPUT.ppm"
++    );
++    ExitCode::from(2)
++}
+diff --git a/crates/t1-touchbar/src/builtin_renderer.rs b/crates/t1-touchbar/src/builtin_renderer.rs
+index 90cead9..fe4dcdd 100644
+--- a/crates/t1-touchbar/src/builtin_renderer.rs
++++ b/crates/t1-touchbar/src/builtin_renderer.rs
+@@ -1,29 +1,37 @@
+-//! Production built-in renderer for the first private Touch Bar cutover.
++//! Production built-in renderer for the Touch Bar.
+ 
+ use std::collections::BTreeMap;
++use std::env;
+ use std::fmt;
++use std::fs;
+ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+-use std::path::Path;
++use std::path::{Path, PathBuf};
++use std::process::{Child, Command, Stdio};
+ use std::thread;
+ use std::time::{Duration, Instant};
+ 
+ use t1_platform::diagnostics::{Component, Outcome, Record, Stage, emit};
+ use t1_platform::frame_memfd::RendererFrame;
+ use t1_platform::seqpacket::{self, SeqPacketClient, SeqPacketError};
++use t1_platform::system_brightness::{BrightnessKind, SystemBrightnessControls};
+ use t1_touchbar_hw::digitizer::DisplayDimensions;
+ use t1_touchbar_hw::packet::MAX_PACKET_LENGTH;
+ use t1_touchbar_hw::wire::{
+     self, AncillaryMetadata, ClientMessage, Envelope, ErrorCode, FeatureBits, Hello, HelloAck,
+-    InputContact, KeyCode, RegisterBuffer, ServiceMessage, StepDirection as WireStepDirection,
+-    SubmitFrame, TapKeys, WireInputFrame,
++    InputContact, KeyCode, Percentage, RegisterBuffer, ServiceMessage,
++    StepDirection as WireStepDirection, SubmitFrame, TapKeys, WireInputFrame,
+ };
+ 
+-use crate::desktop_provider::{DesktopAction, DesktopCapabilities, DesktopProvider, DesktopState};
++use crate::cpu_usage::CoreUsage;
++use crate::desktop_provider::{
++    DesktopAction, DesktopCapabilities, DesktopProvider, DesktopState, resolve_provider_path,
++};
+ use crate::framebuffer::Xrgb8888Frame;
+-use crate::gesture::{DisplayContact, GestureEngine, GestureSettings};
++use crate::gesture::{ContactId, DisplayContact, Gesture, GestureEngine, GestureSettings};
+ use crate::overlay_state::{OverlayState, OverlayWatcher};
+ use crate::stock_slice::{
+-    FunctionKey, StepDirection, StockAction, StockBar, StockCapabilities, StockLevels,
++    FunctionKey, SliderControl, StepDirection, StockAction, StockBar, StockCapabilities,
++    StockLevels,
+ };
+ use crate::touch_id_overlay::TouchIdOverlay;
+ 
+@@ -40,6 +48,11 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
+ const HOLD_REPEAT_INTERVAL: Duration = Duration::from_millis(90);
+ const OVERLAY_FADE_DURATION: Duration = Duration::from_millis(150);
+ const ENROLLMENT_PROGRESS_DURATION: Duration = Duration::from_millis(220);
++const SLIDER_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
++const BRIGHTNESS_FEEDBACK_INTERVAL: Duration = Duration::from_millis(135);
++const BRIGHTNESS_READ_INTERVAL: Duration = Duration::from_millis(500);
++const SLIDER_PANEL_TIMEOUT: Duration = Duration::from_secs(5);
++const CPU_METRICS_INTERVAL: Duration = Duration::from_secs(1);
+ 
+ /// Static, redaction-safe failure from one hardware-service connection.
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -71,13 +84,38 @@ impl std::error::Error for BuiltinRendererError {}
+ 
+ /// Runs the built-in renderer and reconnects forever with capped backoff.
+ pub fn run_forever(provider_path: Option<&Path>) {
+-    let provider = provider_path.and_then(DesktopProvider::start);
++    run_with_layout(provider_path, StockCapabilities::default());
++}
++
++/// Runs the KDE-oriented extension through the same hardware and desktop services.
++pub fn run_extended_forever(provider_path: Option<&Path>) {
++    let mut layout = StockCapabilities::EXTENDED_CONTROLS;
++    if shortcut_url("T1BRIDGE_SHORTCUT_1").is_some() {
++        layout = layout | StockCapabilities::SHORTCUT_ONE;
++    }
++    if shortcut_url("T1BRIDGE_SHORTCUT_2").is_some() {
++        layout = layout | StockCapabilities::SHORTCUT_TWO;
++    }
++    if status_launcher().is_some() || status_command_configured() {
++        layout = layout | StockCapabilities::SCHEDULE;
++    }
++    run_with_layout(provider_path, layout);
++}
++
++fn run_with_layout(provider_path: Option<&Path>, layout: StockCapabilities) {
++    let provider = provider_path.and_then(|path| {
++        if layout.contains(StockCapabilities::EXTENDED_CONTROLS) {
++            DesktopProvider::start_with_tools(path)
++        } else {
++            DesktopProvider::start(path)
++        }
++    });
+     let mut delay = INITIAL_RECONNECT_DELAY;
+     loop {
+         if let Err(error) = t1_platform::diagnostics::observe(
+             t1_platform::diagnostics::Component::Renderer,
+             t1_platform::diagnostics::Stage::RendererConnect,
+-            || run_once(provider.as_ref()),
++            || run_once(provider.as_ref(), layout),
+         ) {
+             eprintln!("t1-touchbar: {error}; reconnecting");
+         }
+@@ -90,7 +128,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
+     delay.saturating_mul(2).min(MAX_RECONNECT_DELAY)
+ }
+ 
+-fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererError> {
++fn run_once(
++    provider: Option<&DesktopProvider>,
++    layout: StockCapabilities,
++) -> Result<(), BuiltinRendererError> {
+     let NegotiatedConnection {
+         mut connection,
+         request_ids,
+@@ -102,7 +143,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+     let mut session = RendererSession::new(
+         dimensions,
+         request_ids,
+-        stock_capabilities(features, ack.minor),
++        stock_capabilities(features, ack.minor) | layout,
+     )?;
+     session.register(&connection)?;
+     let overlay_watcher = OverlayWatcher::start();
+@@ -114,6 +155,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+             session.set_desktop_state(state)?;
+             session.submit_if_ready(&connection)?;
+         }
++        if let Some(provider) = provider {
++            let visible = session.stock.tools_open() && !session.display_off;
++            provider.set_tools_visible(visible);
++            if let Some(status) = provider.take_tools_status() {
++                session.dirty |= visible
++                    && (session.levels.microphone_muted != status.microphone_muted
++                        || session.levels.lesson != status.lesson);
++                session.levels.microphone_muted = status.microphone_muted;
++                session.levels.lesson = status.lesson;
++            }
++        }
+         if let Some(observation) = overlay_watcher.take_latest() {
+             let overlay = observation.overlay();
+             session.set_overlay(
+@@ -321,6 +373,7 @@ enum PendingRequest {
+     TapKeys,
+     CancelTouchId,
+     HardwareAction(Option<DesktopAction>),
++    SliderBrightness { control: SliderControl, level: u8 },
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -339,6 +392,12 @@ struct RendererSession {
+     pending_desktop_state: Option<DesktopState>,
+     display_off: bool,
+     levels: StockLevels,
++    brightness: SystemBrightnessControls,
++    sliders: [SliderState; 3],
++    slider_panel_deadline: Option<Duration>,
++    desktop_launcher: Option<Child>,
++    next_cpu_metrics_read: Duration,
++    core_usage: Option<CoreUsage>,
+     touch_id: TouchIdOverlay,
+     overlay_state: Option<OverlayState>,
+     overlay_visual_state: Option<OverlayState>,
+@@ -390,6 +449,12 @@ impl RendererSession {
+             pending_desktop_state: None,
+             display_off: false,
+             levels: StockLevels::default(),
++            brightness: SystemBrightnessControls::discover(),
++            sliders: [SliderState::default(); 3],
++            slider_panel_deadline: None,
++            desktop_launcher: None,
++            next_cpu_metrics_read: Duration::ZERO,
++            core_usage: None,
+             touch_id,
+             overlay_state: None,
+             overlay_visual_state: None,
+@@ -463,6 +528,13 @@ impl RendererSession {
+                 if !in_flight.acknowledged || release.frame_id != in_flight.frame_id {
+                     return Err(BuiltinRendererError::Protocol);
+                 }
++                if release.frame_id == FIRST_FRAME_ID
++                    && self
++                        .hardware_capabilities
++                        .contains(StockCapabilities::EXTENDED_CONTROLS)
++                {
++                    eprintln!("t1-touchbar-kde: extended layout presented");
++                }
+                 self.in_flight = None;
+                 self.submit_if_ready(connection)
+             }
+@@ -472,6 +544,19 @@ impl RendererSession {
+                 }
+                 let outcome = self.observe_input(frame)?;
+                 self.dirty |= outcome.redraw;
++                if outcome.slider_level.is_some() || outcome.slider_released.is_some() {
++                    self.refresh_slider_panel_deadline();
++                }
++                if let Some((control, level)) = outcome.slider_level
++                    && *slider_level(&mut self.levels, control) != Some(level)
++                {
++                    self.sliders[slider_index(control)].desired = Some(level);
++                    *slider_level(&mut self.levels, control) = Some(level);
++                    self.dirty = true;
++                }
++                if let Some(control) = outcome.slider_released {
++                    self.sliders[slider_index(control)].show_feedback = true;
++                }
+                 for action in outcome.actions {
+                     self.dispatch(action, connection, provider)?;
+                 }
+@@ -525,6 +610,17 @@ impl RendererSession {
+                 ));
+                 Ok(())
+             }
++            PendingRequest::SliderBrightness { control, level } => {
++                if !self.display_off {
++                    self.sliders[slider_index(control)]
++                        .brightness_feedback
++                        .confirmed = Some(level);
++                    if self.input.slider_held(control) {
++                        self.report_slider_brightness(control, provider, false);
++                    }
++                }
++                Ok(())
++            }
+             PendingRequest::TapKeys => Ok(()),
+             PendingRequest::Register => Err(BuiltinRendererError::Protocol),
+         }
+@@ -551,6 +647,7 @@ impl RendererSession {
+         match pending {
+             PendingRequest::TapKeys
+             | PendingRequest::CancelTouchId
++            | PendingRequest::SliderBrightness { .. }
+             | PendingRequest::HardwareAction(_) => {
+                 eprintln!("t1-touchbar: typed action was rejected");
+                 Ok(())
+@@ -572,6 +669,11 @@ impl RendererSession {
+         &mut self,
+         mut frame: WireInputFrame,
+     ) -> Result<InputOutcome, BuiltinRendererError> {
++        // A contact from one Fn layer must never activate a different control
++        // when the finger is lifted on the other layer.
++        if self.input.fn_pressed() != frame.fn_pressed && !self.input.is_idle() {
++            self.input.cancel_touches();
++        }
+         if self.display_off || self.input.wait_for_touch_release {
+             self.input.wait_for_touch_release = frame.contacts.iter().any(|contact| contact.tip);
+             frame.contacts.clear();
+@@ -635,31 +737,18 @@ impl RendererSession {
+             return self.send_keys(&[key], connection);
+         }
+         match action {
+-            StockAction::StepDisplayBrightness(direction) => {
+-                let feedback = self
+-                    .desktop_state
+-                    .capabilities
+-                    .contains(DesktopCapabilities::LEVEL_FEEDBACK)
+-                    .then_some(DesktopAction::ShowDisplayBrightness);
+-                self.send_hardware_action(
+-                    ClientMessage::StepDisplayBrightness(wire_step(direction)),
+-                    feedback,
+-                    connection,
+-                )
+-            }
+-            StockAction::StepKeyboardBacklight(direction) => {
+-                let feedback = self
+-                    .desktop_state
+-                    .capabilities
+-                    .contains(DesktopCapabilities::LEVEL_FEEDBACK)
+-                    .then_some(DesktopAction::ShowKeyboardBacklight);
+-                self.send_hardware_action(
+-                    ClientMessage::StepKeyboardBacklight(wire_step(direction)),
+-                    feedback,
+-                    connection,
+-                )
+-            }
++            StockAction::StepDisplayBrightness(direction) => self.step_brightness(
++                ClientMessage::StepDisplayBrightness(wire_step(direction)),
++                DesktopAction::ShowDisplayBrightness,
++                connection,
++            ),
++            StockAction::StepKeyboardBacklight(direction) => self.step_brightness(
++                ClientMessage::StepKeyboardBacklight(wire_step(direction)),
++                DesktopAction::ShowKeyboardBacklight,
++                connection,
++            ),
+             StockAction::ToggleMute => {
++                self.refresh_slider_panel_deadline();
+                 self.levels.muted = !self.levels.muted;
+                 self.dirty = true;
+                 dispatch_desktop(provider, DesktopAction::ToggleMute);
+@@ -688,10 +777,73 @@ impl RendererSession {
+                 dispatch_desktop(provider, DesktopAction::MediaNext);
+                 Ok(())
+             }
++            StockAction::OpenTerminal
++            | StockAction::LaunchSchedule
++            | StockAction::OpenSystemMonitor
++            | StockAction::OpenShortcutOne
++            | StockAction::OpenShortcutTwo => {
++                self.launch_desktop_action(action);
++                Ok(())
++            }
++            StockAction::OpenSlider(control) => {
++                self.set_slider_panel(Some(control));
++                Ok(())
++            }
++            StockAction::CloseSlider => {
++                self.set_slider_panel(None);
++                Ok(())
++            }
++            StockAction::OpenTools => {
++                self.set_stock_panel(self.stock.with_open_slider(None).with_tools(true));
++                self.next_cpu_metrics_read = self.now;
++                self.core_usage = None;
++                self.levels.cpu_cores = [None; 2];
++                self.levels.lesson = None;
++                Ok(())
++            }
++            StockAction::ToggleMicrophoneMute => {
++                dispatch_desktop(provider, DesktopAction::ToggleMicrophoneMute);
++                Ok(())
++            }
+             StockAction::Escape | StockAction::Function(_) => unreachable!(),
+         }
+     }
+ 
++    fn launch_desktop_action(&mut self, action: StockAction) {
++        if self.desktop_launcher.is_some() {
++            return;
++        }
++        self.desktop_launcher = match action {
++            StockAction::OpenTerminal => launch_desktop_app("/usr/bin/konsole", &[]),
++            StockAction::LaunchSchedule => status_launcher().and_then(|path| launch_status(&path)),
++            StockAction::OpenSystemMonitor => launch_desktop_app(
++                "/usr/bin/plasma-systemmonitor",
++                &["--page-id", "processes.page"],
++            ),
++            StockAction::OpenShortcutOne => {
++                shortcut_url("T1BRIDGE_SHORTCUT_1").and_then(|url| open_website(&url))
++            }
++            StockAction::OpenShortcutTwo => {
++                shortcut_url("T1BRIDGE_SHORTCUT_2").and_then(|url| open_website(&url))
++            }
++            _ => unreachable!(),
++        };
++    }
++
++    fn step_brightness(
++        &mut self,
++        action: ClientMessage,
++        feedback: DesktopAction,
++        connection: &HardwareConnection,
++    ) -> Result<(), BuiltinRendererError> {
++        let feedback = self
++            .desktop_state
++            .capabilities
++            .contains(DesktopCapabilities::LEVEL_FEEDBACK)
++            .then_some(feedback);
++        self.send_hardware_action(action, feedback, connection)
++    }
++
+     fn send_hardware_action(
+         &mut self,
+         action: ClientMessage,
+@@ -832,6 +984,37 @@ impl RendererSession {
+         self.now = now;
+         self.advance_overlay_fade(now);
+         self.advance_enrollment_progress(now);
++        if self
++            .slider_panel_deadline
++            .is_some_and(|deadline| now >= deadline)
++        {
++            self.set_slider_panel(None);
++        }
++        if self
++            .desktop_launcher
++            .as_mut()
++            .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
++        {
++            self.desktop_launcher = None;
++        }
++        if self.stock.tools_open() && !self.display_off && now >= self.next_cpu_metrics_read {
++            self.next_cpu_metrics_read = now + CPU_METRICS_INTERVAL;
++            let temperature = read_cpu_temperature();
++            let cores = self.core_usage.get_or_insert_with(CoreUsage::new).sample();
++            self.dirty |=
++                self.levels.cpu_temperature != temperature || self.levels.cpu_cores != cores;
++            self.levels.cpu_temperature = temperature;
++            self.levels.cpu_cores = cores;
++        }
++        if self
++            .hardware_capabilities
++            .contains(StockCapabilities::EXTENDED_CONTROLS)
++            && !self.display_off
++        {
++            for control in SLIDER_CONTROLS {
++                self.advance_slider(control, connection, provider)?;
++            }
++        }
+         if !self.display_off
+             && !self.input.wait_for_touch_release
+             && let Some(action) = self.input.take_repeat(now)
+@@ -841,6 +1024,146 @@ impl RendererSession {
+         self.submit_if_ready(connection)
+     }
+ 
++    fn advance_slider(
++        &mut self,
++        control: SliderControl,
++        connection: &HardwareConnection,
++        provider: Option<&DesktopProvider>,
++    ) -> Result<(), BuiltinRendererError> {
++        let available = match control {
++            SliderControl::DisplayBrightness => self
++                .hardware_capabilities
++                .contains(StockCapabilities::DISPLAY_BRIGHTNESS),
++            SliderControl::KeyboardBacklight => self
++                .hardware_capabilities
++                .contains(StockCapabilities::KEYBOARD_BACKLIGHT),
++            SliderControl::Volume => self
++                .desktop_state
++                .capabilities
++                .contains(DesktopCapabilities::AUDIO),
++        };
++        let index = slider_index(control);
++        if !available {
++            self.sliders[index] = SliderState::default();
++            return Ok(());
++        }
++        if self.pending.values().any(|request| {
++            matches!(
++                request,
++                PendingRequest::SliderBrightness { control: pending, .. } if *pending == control
++            )
++        }) {
++            return Ok(());
++        }
++        if let Some(level) = self.sliders[index].desired {
++            if self.now < self.sliders[index].next_write {
++                return Ok(());
++            }
++            match control {
++                SliderControl::Volume => {
++                    dispatch_desktop(provider, DesktopAction::SetVolumePreview(level));
++                }
++                SliderControl::DisplayBrightness | SliderControl::KeyboardBacklight => {
++                    let percentage =
++                        Percentage::new(level).map_err(|_| BuiltinRendererError::Protocol)?;
++                    let request_id =
++                        self.allocate_request(PendingRequest::SliderBrightness { control, level })?;
++                    let message = Envelope {
++                        request_id,
++                        message: match control {
++                            SliderControl::DisplayBrightness => {
++                                ClientMessage::SetDisplayBrightness(percentage)
++                            }
++                            SliderControl::KeyboardBacklight => {
++                                ClientMessage::SetKeyboardBacklight(percentage)
++                            }
++                            SliderControl::Volume => unreachable!(),
++                        },
++                    };
++                    connection.send_request(&message, Some(self.dimensions), None)?;
++                }
++            }
++            self.sliders[index].desired = None;
++            self.sliders[index].next_write = self.now + SLIDER_UPDATE_INTERVAL;
++            return Ok(());
++        }
++        if std::mem::take(&mut self.sliders[index].show_feedback) {
++            if control == SliderControl::Volume {
++                if let Some(level) = self.levels.volume {
++                    dispatch_desktop(provider, DesktopAction::SetVolume(level));
++                    self.sliders[index].next_write = self.now + SLIDER_UPDATE_INTERVAL;
++                }
++                return Ok(());
++            }
++            self.report_slider_brightness(control, provider, true);
++            self.sliders[index].brightness_feedback = BrightnessFeedback::default();
++        }
++        if control != SliderControl::Volume
++            && !self.input.slider_held(control)
++            && self.now >= self.sliders[index].next_read
++        {
++            self.sliders[index].next_read = self.now + BRIGHTNESS_READ_INTERVAL;
++            let kind = match control {
++                SliderControl::DisplayBrightness => BrightnessKind::Display,
++                SliderControl::KeyboardBacklight => BrightnessKind::Keyboard,
++                SliderControl::Volume => unreachable!(),
++            };
++            let level = self.brightness.current_percentage(kind).ok();
++            let displayed = slider_level(&mut self.levels, control);
++            self.dirty |= *displayed != level;
++            *displayed = level;
++        }
++        Ok(())
++    }
++
++    fn report_slider_brightness(
++        &mut self,
++        control: SliderControl,
++        provider: Option<&DesktopProvider>,
++        released: bool,
++    ) {
++        let feedback = &mut self.sliders[slider_index(control)].brightness_feedback;
++        if !self
++            .desktop_state
++            .capabilities
++            .contains(DesktopCapabilities::LEVEL_FEEDBACK)
++            || !feedback.due(self.now, released)
++        {
++            return;
++        }
++        let action = match control {
++            SliderControl::DisplayBrightness => DesktopAction::ShowDisplayBrightness,
++            SliderControl::KeyboardBacklight => DesktopAction::ShowKeyboardBacklight,
++            SliderControl::Volume => unreachable!(),
++        };
++        if provider.is_some_and(|provider| provider.dispatch(action)) {
++            feedback.mark_queued(self.now);
++        }
++    }
++
++    fn set_slider_panel(&mut self, open: Option<SliderControl>) {
++        self.set_stock_panel(self.stock.with_tools(false).with_open_slider(open));
++    }
++
++    fn set_stock_panel(&mut self, stock: StockBar) {
++        if !self.input.is_idle() {
++            return;
++        }
++        if stock != self.stock {
++            self.stock = stock;
++            self.input.set_stock(stock);
++            self.dirty = true;
++        }
++        self.refresh_slider_panel_deadline();
++    }
++
++    fn refresh_slider_panel_deadline(&mut self) {
++        self.slider_panel_deadline = self
++            .stock
++            .open_slider()
++            .map(|_| self.now + SLIDER_PANEL_TIMEOUT);
++    }
++
+     fn advance_overlay_fade(&mut self, now: Duration) {
+         if self.overlay_opacity == self.overlay_target_opacity {
+             return;
+@@ -895,15 +1218,13 @@ impl RendererSession {
+             self.display_off = state.display_off;
+             if self.display_off {
+                 self.input.cancel_touches();
++                self.sliders = [SliderState::default(); 3];
++                self.slider_panel_deadline = self.stock.open_slider().map(|_| self.now);
+             }
+             self.dirty = true;
+         }
+         if self.desktop_state == state && self.pending_desktop_state.is_none() {
+-            if self.levels.volume != state.volume || self.levels.muted != state.muted {
+-                self.levels.volume = state.volume;
+-                self.levels.muted = state.muted;
+-                self.dirty = true;
+-            }
++            self.sync_audio_levels(state);
+             return Ok(());
+         }
+         if !self.input.is_idle() {
+@@ -930,17 +1251,36 @@ impl RendererSession {
+             self.dimensions.height(),
+             capabilities,
+         )
+-        .map_err(|_| BuiltinRendererError::Negotiation)?;
++        .map_err(|_| BuiltinRendererError::Negotiation)?
++        .with_open_slider(self.stock.open_slider())
++        .with_tools(self.stock.tools_open());
+         self.stock = stock;
+         self.input.set_stock(stock);
+-        self.levels.volume = state.volume;
+-        self.levels.muted = state.muted;
++        if stock.open_slider().is_none() {
++            self.slider_panel_deadline = None;
++        }
++        self.sync_audio_levels(state);
+         self.desktop_state = state;
+         self.pending_desktop_state = None;
+         self.dirty = true;
+         Ok(())
+     }
+ 
++    fn sync_audio_levels(&mut self, state: DesktopState) {
++        let slider = self.sliders[slider_index(SliderControl::Volume)];
++        let updating = self.input.slider_held(SliderControl::Volume)
++            || slider.desired.is_some()
++            || slider.show_feedback
++            || (slider.next_write != Duration::ZERO
++                && self.now < slider.next_write + BRIGHTNESS_READ_INTERVAL);
++        if !updating || !state.capabilities.contains(DesktopCapabilities::AUDIO) {
++            self.dirty |= self.levels.volume != state.volume;
++            self.levels.volume = state.volume;
++        }
++        self.dirty |= self.levels.muted != state.muted;
++        self.levels.muted = state.muted;
++    }
++
+     fn allocate_request(&mut self, kind: PendingRequest) -> Result<u32, BuiltinRendererError> {
+         if self.pending.len() >= MAX_PENDING_REQUESTS {
+             return Err(BuiltinRendererError::Protocol);
+@@ -960,6 +1300,134 @@ impl RendererSession {
+     }
+ }
+ 
++const SLIDER_CONTROLS: [SliderControl; 3] = [
++    SliderControl::DisplayBrightness,
++    SliderControl::KeyboardBacklight,
++    SliderControl::Volume,
++];
++
++const fn slider_index(control: SliderControl) -> usize {
++    match control {
++        SliderControl::DisplayBrightness => 0,
++        SliderControl::KeyboardBacklight => 1,
++        SliderControl::Volume => 2,
++    }
++}
++
++fn slider_level(levels: &mut StockLevels, control: SliderControl) -> &mut Option<u8> {
++    match control {
++        SliderControl::DisplayBrightness => &mut levels.display_brightness,
++        SliderControl::KeyboardBacklight => &mut levels.keyboard_backlight,
++        SliderControl::Volume => &mut levels.volume,
++    }
++}
++
++#[derive(Clone, Copy, Default)]
++struct SliderState {
++    desired: Option<u8>,
++    show_feedback: bool,
++    next_write: Duration,
++    next_read: Duration,
++    brightness_feedback: BrightnessFeedback,
++}
++
++#[derive(Clone, Copy, Default)]
++struct BrightnessFeedback {
++    confirmed: Option<u8>,
++    queued: Option<u8>,
++    next_preview: Duration,
++}
++
++impl BrightnessFeedback {
++    fn due(self, now: Duration, released: bool) -> bool {
++        if released {
++            self.confirmed.is_none() || self.confirmed != self.queued
++        } else {
++            self.confirmed.is_some() && self.confirmed != self.queued && now >= self.next_preview
++        }
++    }
++
++    fn mark_queued(&mut self, now: Duration) {
++        self.queued = self.confirmed;
++        self.next_preview = now + BRIGHTNESS_FEEDBACK_INTERVAL;
++    }
++}
++
++fn read_cpu_temperature() -> Option<i16> {
++    for entry in fs::read_dir("/sys/class/hwmon").ok()?.flatten() {
++        let device = entry.path();
++        if fs::read_to_string(device.join("name")).is_ok_and(|name| name.trim() == "coretemp")
++            && fs::read_to_string(device.join("temp1_label"))
++                .is_ok_and(|label| label.trim() == "Package id 0")
++        {
++            let millidegrees: i32 = fs::read_to_string(device.join("temp1_input"))
++                .ok()?
++                .trim()
++                .parse()
++                .ok()?;
++            return i16::try_from(millidegrees / 1000).ok();
++        }
++    }
++    None
++}
++
++fn shortcut_url(variable: &str) -> Option<String> {
++    let url = env::var(variable).ok()?;
++    let target = url
++        .strip_prefix("https://")
++        .or_else(|| url.strip_prefix("http://"))?;
++    let authority = target.split(['/', '?', '#']).next()?;
++    (!authority.is_empty() && !authority.contains('@') && !url.chars().any(char::is_whitespace))
++        .then_some(url)
++}
++
++fn status_launcher() -> Option<PathBuf> {
++    let path = PathBuf::from(env::var_os("T1BRIDGE_STATUS_DESKTOP_FILE")?);
++    (path.is_absolute()
++        && path
++            .extension()
++            .is_some_and(|extension| extension == "desktop")
++        && path.is_file())
++    .then_some(path)
++}
++
++fn status_command_configured() -> bool {
++    resolve_provider_path(env::var_os("T1BRIDGE_STATUS_COMMAND").as_deref()).is_some()
++}
++
++fn launch_status(path: &Path) -> Option<Child> {
++    Command::new("/usr/bin/gio")
++        .arg("launch")
++        .arg(path)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .spawn()
++        .map_err(|error| eprintln!("t1-touchbar: status launcher: {error}"))
++        .ok()
++}
++
++fn launch_desktop_app(program: &str, arguments: &[&str]) -> Option<Child> {
++    Command::new("/usr/bin/systemd-run")
++        .args(["--user", "--quiet", "--collect", "--service-type=exec"])
++        .arg(program)
++        .args(arguments)
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .spawn()
++        .map_err(|error| eprintln!("t1-touchbar: {program}: {error}"))
++        .ok()
++}
++
++fn open_website(url: &str) -> Option<Child> {
++    Command::new("/usr/bin/gio")
++        .args(["open", url])
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .spawn()
++        .map_err(|error| eprintln!("t1-touchbar: shortcut: {error}"))
++        .ok()
++}
++
+ const fn wire_step(direction: StepDirection) -> WireStepDirection {
+     match direction {
+         StepDirection::Down => WireStepDirection::Down,
+@@ -1007,6 +1475,8 @@ struct InputOutcome {
+     redraw: bool,
+     actions: Vec<StockAction>,
+     cancel_touch_id: bool,
++    slider_level: Option<(SliderControl, u8)>,
++    slider_released: Option<SliderControl>,
+ }
+ 
+ struct InputInterpreter {
+@@ -1018,6 +1488,7 @@ struct InputInterpreter {
+     pressed: Option<StockAction>,
+     repeat: Option<RepeatState>,
+     suppress_tap: Option<StockAction>,
++    slider_contact: Option<(ContactId, SliderControl)>,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -1042,6 +1513,7 @@ impl InputInterpreter {
+             pressed: None,
+             repeat: None,
+             suppress_tap: None,
++            slider_contact: None,
+         })
+     }
+ 
+@@ -1053,6 +1525,10 @@ impl InputInterpreter {
+         self.pressed
+     }
+ 
++    fn slider_held(&self, control: SliderControl) -> bool {
++        self.slider_contact.is_some_and(|(_, held)| held == control)
++    }
++
+     fn is_idle(&self) -> bool {
+         !self.wait_for_touch_release && self.gestures.is_idle()
+     }
+@@ -1092,9 +1568,10 @@ impl InputInterpreter {
+         let pressed = contacts
+             .first()
+             .filter(|contact| {
+-                !self
+-                    .touch_id
+-                    .covers_contact(**contact, overlay_state, self.fn_pressed)
++                self.slider_contact.is_none_or(|(id, _)| id != contact.id())
++                    && !self
++                        .touch_id
++                        .covers_contact(**contact, overlay_state, self.fn_pressed)
+             })
+             .and_then(|contact| self.stock.action_at(*contact, self.fn_pressed));
+         redraw |= self.pressed != pressed;
+@@ -1118,9 +1595,60 @@ impl InputInterpreter {
+             .gestures
+             .ingest_frame(Duration::from_nanos(frame.monotonic_ns), &contacts)
+             .map_err(|_| BuiltinRendererError::Gesture)?;
++        Ok(self.gesture_outcome(gestures, overlay_state, redraw))
++    }
++
++    fn gesture_outcome(
++        &mut self,
++        gestures: Vec<Gesture>,
++        overlay_state: Option<OverlayState>,
++        redraw: bool,
++    ) -> InputOutcome {
+         let mut actions = Vec::new();
+         let mut cancel_touch_id = false;
++        let mut slider_level = None;
++        let mut slider_released = None;
+         for gesture in gestures {
++            match gesture {
++                Gesture::Press(contact)
++                    if !self.fn_pressed
++                        && self.slider_contact.is_none()
++                        && !self.touch_id.covers_contact(contact, overlay_state, false) =>
++                {
++                    if let Some((control, level)) = self.stock.slider_at(contact) {
++                        self.slider_contact = Some((contact.id(), control));
++                        slider_level = Some((control, level));
++                        continue;
++                    }
++                }
++                Gesture::Move { to, .. } | Gesture::Drag { to, .. }
++                    if let Some((id, control)) = self.slider_contact
++                        && id == to.id() =>
++                {
++                    if !self.fn_pressed {
++                        slider_level = self
++                            .stock
++                            .slider_level(control, to.x())
++                            .map(|level| (control, level))
++                            .or(slider_level);
++                    }
++                    continue;
++                }
++                Gesture::Release(contact)
++                    if self
++                        .slider_contact
++                        .is_some_and(|(id, _)| id == contact.id()) =>
++                {
++                    slider_released = self.slider_contact.take();
++                    continue;
++                }
++                Gesture::Tap(contact)
++                    if slider_released.is_some_and(|(id, _)| id == contact.id()) =>
++                {
++                    continue;
++                }
++                _ => {}
++            }
+             if matches!(
+                 gesture,
+                 crate::gesture::Gesture::DragStart(_) | crate::gesture::Gesture::Drag { .. }
+@@ -1161,11 +1689,13 @@ impl InputInterpreter {
+                 actions.push(action);
+             }
+         }
+-        Ok(InputOutcome {
++        InputOutcome {
+             redraw,
+             actions,
+             cancel_touch_id,
+-        })
++            slider_level,
++            slider_released: slider_released.map(|(_, control)| control),
++        }
+     }
+ 
+     fn take_repeat(&mut self, now: Duration) -> Option<StockAction> {
+@@ -1187,6 +1717,7 @@ impl InputInterpreter {
+         self.wait_for_touch_release |= !self.gestures.is_idle();
+         self.gestures.cancel_all();
+         self.pressed = None;
++        self.slider_contact = None;
+         self.cancel_repeat();
+     }
+ }
+@@ -1230,7 +1761,16 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
+         | StockAction::StepVolume(_)
+         | StockAction::MediaPrevious
+         | StockAction::MediaPlayPause
+-        | StockAction::MediaNext => return None,
++        | StockAction::MediaNext
++        | StockAction::OpenTerminal
++        | StockAction::OpenSlider(_)
++        | StockAction::CloseSlider
++        | StockAction::OpenTools
++        | StockAction::ToggleMicrophoneMute
++        | StockAction::LaunchSchedule
++        | StockAction::OpenSystemMonitor
++        | StockAction::OpenShortcutOne
++        | StockAction::OpenShortcutTwo => return None,
+     })
+ }
+ 
+@@ -1842,6 +2382,8 @@ mod tests {
+                 redraw: true,
+                 actions: Vec::new(),
+                 cancel_touch_id: false,
++                slider_level: None,
++                slider_released: None,
+             }
+         );
+         assert!(interpreter.fn_pressed());
+@@ -1861,6 +2403,146 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn releasing_fn_does_not_activate_the_control_under_the_existing_touch() {
++        let dimensions = DisplayDimensions::new(2170, 60).unwrap();
++        let mut session = RendererSession::new(
++            dimensions,
++            RequestIds { next: 2 },
++            StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap();
++        let held_contact = vec![contact(1, 1637, 30)];
++        session
++            .observe_input(input(1, true, held_contact.clone()))
++            .unwrap();
++        assert_eq!(
++            session.input.pressed(),
++            Some(StockAction::Function(FunctionKey::F11))
++        );
++        assert!(
++            session
++                .observe_input(input(2, false, held_contact.clone()))
++                .unwrap()
++                .actions
++                .is_empty()
++        );
++        assert!(
++            session
++                .observe_input(input(3, false, Vec::new()))
++                .unwrap()
++                .actions
++                .is_empty()
++        );
++        session
++            .observe_input(input(4, false, held_contact))
++            .unwrap();
++        assert_eq!(
++            session
++                .observe_input(input(5, false, Vec::new()))
++                .unwrap()
++                .actions,
++            [StockAction::OpenTerminal]
++        );
++    }
++
++    #[test]
++    fn brightness_feedback_previews_confirmed_levels_and_flushes_changed_releases() {
++        let mut feedback = BrightnessFeedback::default();
++        assert!(!feedback.due(Duration::ZERO, false));
++        assert!(feedback.due(Duration::ZERO, true));
++
++        feedback.confirmed = Some(30);
++        assert!(feedback.due(Duration::ZERO, false));
++        feedback.mark_queued(Duration::ZERO);
++        assert!(!feedback.due(Duration::ZERO, true));
++
++        feedback.confirmed = Some(45);
++        let before_preview = BRIGHTNESS_FEEDBACK_INTERVAL.saturating_sub(Duration::from_millis(1));
++        assert!(!feedback.due(before_preview, false));
++        assert!(feedback.due(before_preview, true));
++        assert!(feedback.due(BRIGHTNESS_FEEDBACK_INTERVAL, false));
++        feedback.mark_queued(BRIGHTNESS_FEEDBACK_INTERVAL);
++        assert!(!feedback.due(BRIGHTNESS_FEEDBACK_INTERVAL, true));
++    }
++
++    #[test]
++    fn slider_drag_follows_the_contact_and_does_not_turn_into_a_button_tap() {
++        let dimensions = DisplayDimensions::new(2170, 60).unwrap();
++        let stock = StockBar::new(
++            dimensions.width(),
++            dimensions.height(),
++            StockCapabilities::EXTENDED_CONTROLS | StockCapabilities::DISPLAY_BRIGHTNESS,
++        )
++        .unwrap();
++        let mut interpreter = InputInterpreter::new(dimensions, stock).unwrap();
++        let press = interpreter
++            .ingest(&input(1, false, vec![contact(1, 400, 30)]), None)
++            .unwrap();
++        let drag = interpreter
++            .ingest(&input(2, false, vec![contact(1, 1150, 30)]), None)
++            .unwrap();
++        assert_eq!(
++            press.slider_level.map(|(control, _)| control),
++            Some(SliderControl::DisplayBrightness)
++        );
++        assert!(drag.slider_level.unwrap().1 > press.slider_level.unwrap().1);
++        assert!(press.actions.is_empty() && drag.actions.is_empty());
++        let release = interpreter
++            .ingest(&input(3, true, Vec::new()), None)
++            .unwrap();
++        assert_eq!(
++            release.slider_released,
++            Some(SliderControl::DisplayBrightness)
++        );
++        assert!(release.actions.is_empty());
++    }
++
++    #[test]
++    fn selected_slider_times_out_but_tools_stay_open_until_back() {
++        let mut session = RendererSession::new(
++            dimensions(),
++            RequestIds { next: 2 },
++            StockCapabilities::EXTENDED_CONTROLS | StockCapabilities::KEYBOARD_BACKLIGHT,
++        )
++        .unwrap();
++        let connection = inert_connection();
++
++        session
++            .dispatch(
++                StockAction::OpenSlider(SliderControl::KeyboardBacklight),
++                &connection,
++                None,
++            )
++            .unwrap();
++        session
++            .apply_desktop_state(DesktopState::default())
++            .unwrap();
++        assert_eq!(
++            session.stock.open_slider(),
++            Some(SliderControl::KeyboardBacklight)
++        );
++        session
++            .advance(SLIDER_PANEL_TIMEOUT, &connection, None)
++            .unwrap();
++        assert_eq!(session.stock.open_slider(), None);
++
++        session
++            .dispatch(StockAction::OpenTools, &connection, None)
++            .unwrap();
++        session
++            .apply_desktop_state(DesktopState::default())
++            .unwrap();
++        session
++            .advance(SLIDER_PANEL_TIMEOUT * 2, &connection, None)
++            .unwrap();
++        assert!(session.stock.tools_open());
++        session
++            .dispatch(StockAction::CloseSlider, &connection, None)
++            .unwrap();
++        assert!(!session.stock.tools_open());
++    }
++
+     #[test]
+     fn escape_remains_active_without_fn_and_function_regions_do_not() {
+         let mut interpreter = new_interpreter();
+diff --git a/crates/t1-touchbar/src/cpu_usage.rs b/crates/t1-touchbar/src/cpu_usage.rs
+new file mode 100644
+index 0000000..eba7759
+--- /dev/null
++++ b/crates/t1-touchbar/src/cpu_usage.rs
+@@ -0,0 +1,101 @@
++use std::{collections::BTreeMap, fs};
++
++#[derive(Clone, Copy, Default)]
++struct CpuTicks {
++    total: u64,
++    idle: u64,
++}
++
++pub(crate) struct CoreUsage {
++    physical_cores: BTreeMap<usize, usize>,
++    previous: [Option<CpuTicks>; 2],
++}
++
++impl CoreUsage {
++    pub(crate) fn new() -> Self {
++        let mut physical_cores = BTreeMap::new();
++        if let Ok(devices) = fs::read_dir("/sys/devices/system/cpu") {
++            for device in devices.flatten() {
++                let name = device.file_name();
++                let Some(cpu) = cpu_number(&name.to_string_lossy()) else {
++                    continue;
++                };
++                let Ok(core) = fs::read_to_string(device.path().join("topology/core_id")) else {
++                    continue;
++                };
++                if let Ok(core @ 0..=1) = core.trim().parse::<usize>() {
++                    physical_cores.insert(cpu, core);
++                }
++            }
++        }
++        Self {
++            physical_cores,
++            previous: [None; 2],
++        }
++    }
++
++    pub(crate) fn sample(&mut self) -> [Option<u8>; 2] {
++        let Ok(stat) = fs::read_to_string("/proc/stat") else {
++            return [None; 2];
++        };
++        self.sample_stat(&stat)
++    }
++
++    fn sample_stat(&mut self, stat: &str) -> [Option<u8>; 2] {
++        let mut current = [None; 2];
++        for line in stat.lines().take_while(|line| line.starts_with("cpu")) {
++            let mut fields = line.split_whitespace();
++            let Some(core) = fields
++                .next()
++                .and_then(cpu_number)
++                .and_then(|cpu| self.physical_cores.get(&cpu).copied())
++            else {
++                continue;
++            };
++            let counters: Vec<u64> = fields
++                .take(8)
++                .map_while(|field| field.parse().ok())
++                .collect();
++            if let [_, _, _, idle, iowait, _, _, _] = counters.as_slice() {
++                let ticks = current[core].get_or_insert(CpuTicks::default());
++                ticks.total += counters.iter().sum::<u64>();
++                ticks.idle += idle + iowait;
++            }
++        }
++        let usage = std::array::from_fn(|core| {
++            let old = self.previous[core]?;
++            let new = current[core]?;
++            let total = new.total.checked_sub(old.total)?;
++            let idle = new.idle.checked_sub(old.idle)?;
++            if total == 0 {
++                return None;
++            }
++            u8::try_from((total.saturating_sub(idle) * 100 + total / 2) / total).ok()
++        });
++        self.previous = current;
++        usage
++    }
++}
++
++fn cpu_number(name: &str) -> Option<usize> {
++    name.strip_prefix("cpu")?.parse().ok()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn aggregates_the_two_logical_threads_of_each_physical_core() {
++        let mut usage = CoreUsage {
++            physical_cores: [(0, 0), (1, 1), (2, 0), (3, 1)].into(),
++            previous: [None; 2],
++        };
++        assert_eq!(usage.sample_stat(
++            "cpu 100 0 0 100 0 0 0 0\ncpu0 0 0 0 100 0 0 0 0\ncpu1 0 0 0 100 0 0 0 0\ncpu2 0 0 0 100 0 0 0 0\ncpu3 0 0 0 100 0 0 0 0\n"
++        ), [None, None]);
++        assert_eq!(usage.sample_stat(
++            "cpu 100 0 0 100 0 0 0 0\ncpu0 100 0 0 100 0 0 0 0\ncpu1 25 0 0 175 0 0 0 0\ncpu2 0 0 0 200 0 0 0 0\ncpu3 25 0 0 175 0 0 0 0\n"
++        ), [Some(50), Some(25)]);
++    }
++}
+diff --git a/crates/t1-touchbar/src/desktop_provider.rs b/crates/t1-touchbar/src/desktop_provider.rs
+index 315fce7..543abbd 100644
+--- a/crates/t1-touchbar/src/desktop_provider.rs
++++ b/crates/t1-touchbar/src/desktop_provider.rs
+@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
+ use std::process::{Child, Command, ExitStatus, Stdio};
+ use std::sync::{
+     Arc, Condvar, Mutex,
+-    mpsc::{self, Receiver, TryRecvError},
++    mpsc::{self, Receiver},
+ };
+ use std::thread;
+ use std::time::{Duration, Instant};
+ 
++use crate::stock_slice::{LessonPhase, LessonStatus};
++
+ pub const PROVIDER_ENVIRONMENT: &str = "T1BRIDGE_DESKTOP_PROVIDER";
+ 
+ const STATUS_MAGIC: &str = "T1BRIDGE-DESKTOP";
+@@ -69,7 +71,9 @@ pub struct DesktopState {
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub enum DesktopAction {
+     SetVolume(u8),
++    SetVolumePreview(u8),
+     ToggleMute,
++    ToggleMicrophoneMute,
+     MediaPrevious,
+     MediaPlayPause,
+     MediaNext,
+@@ -137,10 +141,44 @@ pub fn notify_renderer_fallback(path: &Path, reason: RendererFallback) -> bool {
+     run_action(path, ProviderOperation::NotifyRendererFallback(reason)).is_ok()
+ }
+ 
+-/// Nonblocking handle to one bounded provider worker.
++/// Nonblocking handle to the desktop provider and optional Tools polling.
+ pub struct DesktopProvider {
+     actions: Arc<ActionMailbox>,
+     states: Receiver<DesktopState>,
++    tools: Option<Arc<ToolsMonitor>>,
++}
++
++#[derive(Clone, Copy, Default)]
++pub(crate) struct ToolsStatus {
++    pub microphone_muted: Option<bool>,
++    pub lesson: Option<LessonStatus>,
++}
++
++#[derive(Default)]
++struct ToolsRequests {
++    visible: bool,
++    visibility_generation: u64,
++    refresh_microphone: bool,
++    closed: bool,
++    latest: Option<ToolsStatus>,
++}
++
++#[derive(Default)]
++struct ToolsMonitor {
++    requests: Mutex<ToolsRequests>,
++    ready: Condvar,
++}
++
++impl ToolsMonitor {
++    fn refresh_microphone(&self) {
++        if let Ok(mut requests) = self.requests.lock()
++            && requests.visible
++        {
++            requests.refresh_microphone = true;
++            requests.latest = None;
++            self.ready.notify_one();
++        }
++    }
+ }
+ 
+ #[derive(Debug, Default)]
+@@ -159,37 +197,82 @@ impl DesktopProvider {
+     /// Starts a worker only for a currently valid provider path.
+     #[must_use]
+     pub fn start(path: &Path) -> Option<Self> {
++        Self::start_worker(path, false)
++    }
++
++    #[must_use]
++    pub fn start_with_tools(path: &Path) -> Option<Self> {
++        Self::start_worker(path, true)
++    }
++
++    fn start_worker(path: &Path, tools: bool) -> Option<Self> {
+         let path = resolve_provider_path(Some(path.as_os_str()))?;
+         let (state_sender, state_receiver) = mpsc::channel();
+-        let actions = Arc::new(ActionMailbox::default());
+-        let worker_actions = Arc::clone(&actions);
++        let provider = Self {
++            actions: Arc::new(ActionMailbox::default()),
++            states: state_receiver,
++            tools: tools.then(|| Arc::new(ToolsMonitor::default())),
++        };
++        if let Some(monitor) = &provider.tools {
++            let monitor = Arc::clone(monitor);
++            let tools_path = path.clone();
++            thread::Builder::new()
++                .name("t1-desktop-tools".into())
++                .spawn(move || {
++                    tools_worker(
++                        &monitor,
++                        || query_microphone(&tools_path),
++                        || query_lesson(&tools_path),
++                    );
++                })
++                .ok()?;
++        }
++        let worker_actions = Arc::clone(&provider.actions);
++        let worker_tools = provider.tools.clone();
+         thread::Builder::new()
+             .name("t1-desktop-provider".into())
+-            .spawn(move || provider_worker(&path, &worker_actions, &state_sender))
++            .spawn(move || {
++                provider_worker(
++                    &path,
++                    &worker_actions,
++                    &state_sender,
++                    worker_tools.as_deref(),
++                );
++            })
+             .ok()?;
+-        Some(Self {
+-            actions,
+-            states: state_receiver,
+-        })
++        Some(provider)
+     }
+ 
+     /// Returns the newest available status and discards superseded snapshots.
+     #[must_use]
+     pub fn take_latest(&self) -> Option<DesktopState> {
+-        let mut latest = None;
+-        loop {
+-            match self.states.try_recv() {
+-                Ok(state) => latest = Some(state),
+-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return latest,
+-            }
++        self.states.try_iter().last()
++    }
++
++    #[must_use]
++    pub(crate) fn take_tools_status(&self) -> Option<ToolsStatus> {
++        self.tools.as_ref()?.requests.lock().ok()?.latest.take()
++    }
++
++    pub(crate) fn set_tools_visible(&self, visible: bool) {
++        if let Some(tools) = &self.tools
++            && let Ok(mut requests) = tools.requests.lock()
++            && requests.visible != visible
++        {
++            requests.visible = visible;
++            requests.visibility_generation = requests.visibility_generation.wrapping_add(1);
++            requests.refresh_microphone = false;
++            requests.latest = None;
++            tools.ready.notify_one();
+         }
+     }
+ 
+     /// Queues one action without blocking display or input work.
+     ///
+     /// Consecutive volume positions replace the pending position instead of
+-    /// building a drag backlog. Returns false when the bounded action queue is
+-    /// full or the worker is gone.
++    /// building a drag backlog. Pending brightness feedback reads the latest
++    /// value when it runs, so one queued request per brightness control suffices.
++    /// Returns false when the bounded action queue is full or the worker is gone.
+     #[must_use]
+     pub fn dispatch(&self, action: DesktopAction) -> bool {
+         let Ok(mut queue) = self.actions.queue.lock() else {
+@@ -200,10 +283,27 @@ impl DesktopProvider {
+         }
+         let action = match action {
+             DesktopAction::SetVolume(value) => DesktopAction::SetVolume(value.min(100)),
++            DesktopAction::SetVolumePreview(value) => {
++                DesktopAction::SetVolumePreview(value.min(100))
++            }
+             action => action,
+         };
+-        if matches!(action, DesktopAction::SetVolume(_))
+-            && let Some(pending @ DesktopAction::SetVolume(_)) = queue.pending.back_mut()
++        if matches!(
++            action,
++            DesktopAction::ShowDisplayBrightness | DesktopAction::ShowKeyboardBacklight
++        ) && queue.pending.contains(&action)
++        {
++            return true;
++        }
++        if let Some(pending) = queue.pending.back_mut()
++            && matches!(
++                (*pending, action),
++                (DesktopAction::SetVolume(_), DesktopAction::SetVolume(_))
++                    | (
++                        DesktopAction::SetVolumePreview(_),
++                        DesktopAction::SetVolumePreview(_)
++                    )
++            )
+         {
+             *pending = action;
+         } else if queue.pending.len() < ACTION_QUEUE_CAPACITY {
+@@ -222,10 +322,21 @@ impl Drop for DesktopProvider {
+             queue.closed = true;
+             self.actions.ready.notify_one();
+         }
++        if let Some(tools) = &self.tools
++            && let Ok(mut requests) = tools.requests.lock()
++        {
++            requests.closed = true;
++            tools.ready.notify_one();
++        }
+     }
+ }
+ 
+-fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<DesktopState>) {
++fn provider_worker(
++    path: &Path,
++    actions: &ActionMailbox,
++    states: &mpsc::Sender<DesktopState>,
++    tools: Option<&ToolsMonitor>,
++) {
+     let mut available = None;
+     loop {
+         let state = if let Ok(state) = query_status(path) {
+@@ -241,7 +352,6 @@ fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<D
+         if states.send(state).is_err() {
+             return;
+         }
+-
+         let refresh_at = Instant::now() + STATUS_INTERVAL;
+         loop {
+             let Some(action) = take_action(actions, refresh_at) else {
+@@ -253,8 +363,117 @@ fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<D
+             if run_action(path, ProviderOperation::Desktop(action)).is_err() {
+                 report_availability(&mut available, false);
+             }
++            if action == DesktopAction::ToggleMicrophoneMute
++                && let Some(tools) = tools
++            {
++                tools.refresh_microphone();
++            }
++        }
++    }
++}
++
++fn tools_worker(
++    monitor: &ToolsMonitor,
++    mut read_microphone: impl FnMut() -> Option<bool>,
++    mut read_lesson: impl FnMut() -> Option<LessonStatus>,
++) {
++    let mut status = ToolsStatus::default();
++    let mut generation = 0;
++    let mut next_microphone = Instant::now();
++    let mut next_lesson = next_microphone;
++    let Ok(mut requests) = monitor.requests.lock() else {
++        return;
++    };
++    while !requests.closed {
++        if !requests.visible {
++            let Ok(next) = monitor.ready.wait(requests) else {
++                return;
++            };
++            requests = next;
++            continue;
++        }
++
++        let now = Instant::now();
++        if generation != requests.visibility_generation {
++            generation = requests.visibility_generation;
++            status = ToolsStatus::default();
++            next_microphone = now;
++            next_lesson = now;
++        }
++        let refresh_microphone = requests.refresh_microphone || now >= next_microphone;
++        if !refresh_microphone && now < next_lesson {
++            let delay = next_microphone
++                .min(next_lesson)
++                .saturating_duration_since(now);
++            let Ok((next, _)) = monitor.ready.wait_timeout(requests, delay) else {
++                return;
++            };
++            requests = next;
++            continue;
+         }
++        requests.refresh_microphone = false;
++        drop(requests);
++        // The two queries have separate deadlines. A mute action wakes only
++        // the microphone poll and leaves the lesson cadence untouched.
++        if refresh_microphone {
++            status.microphone_muted = read_microphone();
++            next_microphone = Instant::now() + STATUS_INTERVAL;
++        } else {
++            status.lesson = read_lesson();
++            next_lesson = Instant::now() + STATUS_INTERVAL;
++        }
++        let Ok(next) = monitor.requests.lock() else {
++            return;
++        };
++        requests = next;
++        // Ignore readings from a previous opening of Tools and any microphone
++        // snapshot superseded by an action while a query was running.
++        if !requests.closed
++            && requests.visible
++            && generation == requests.visibility_generation
++            && !requests.refresh_microphone
++        {
++            requests.latest = Some(status);
++        }
++    }
++}
++
++fn query_microphone(path: &Path) -> Option<bool> {
++    run_provider(path, &["v1", "microphone-muted"], true)
++        .ok()
++        .and_then(|output| match output.as_slice() {
++            b"0\n" => Some(false),
++            b"1\n" => Some(true),
++            _ => None,
++        })
++}
++
++fn query_lesson(path: &Path) -> Option<LessonStatus> {
++    run_provider(path, &["v1", "lesson-status"], true)
++        .ok()
++        .and_then(|output| parse_lesson_status(&output))
++}
++
++fn parse_lesson_status(output: &[u8]) -> Option<LessonStatus> {
++    let mut fields = std::str::from_utf8(output).ok()?.split_ascii_whitespace();
++    let phase = fields.next()?;
++    let number = fields.next()?.parse::<u8>().ok()?;
++    let remaining = fields.next()?;
++    if fields.next().is_some() {
++        return None;
+     }
++    let (phase, remaining_seconds) = match (phase, number, remaining) {
++        ("class", 1..=20, seconds) => (LessonPhase::Class(number), Some(seconds.parse().ok()?)),
++        ("break", 1..=20, seconds) => (LessonPhase::Break(number), Some(seconds.parse().ok()?)),
++        ("before", 0, seconds) => (LessonPhase::BeforeSchool, Some(seconds.parse().ok()?)),
++        ("after", 0, "-") => (LessonPhase::AfterSchool, None),
++        ("free", 0, "-") => (LessonPhase::Free, None),
++        _ => return None,
++    };
++    Some(LessonStatus {
++        phase,
++        remaining_seconds,
++    })
+ }
+ 
+ fn take_action(actions: &ActionMailbox, deadline: Instant) -> Option<DesktopAction> {
+@@ -324,9 +543,16 @@ fn action_arguments(operation: ProviderOperation) -> Vec<OsString> {
+             arguments.push(OsString::from("set-volume"));
+             arguments.push(OsString::from(value.min(100).to_string()));
+         }
++        ProviderOperation::Desktop(DesktopAction::SetVolumePreview(value)) => {
++            arguments.push(OsString::from("set-volume-preview"));
++            arguments.push(OsString::from(value.min(100).to_string()));
++        }
+         ProviderOperation::Desktop(DesktopAction::ToggleMute) => {
+             arguments.push(OsString::from("toggle-mute"));
+         }
++        ProviderOperation::Desktop(DesktopAction::ToggleMicrophoneMute) => {
++            arguments.push(OsString::from("toggle-microphone-mute"));
++        }
+         ProviderOperation::Desktop(DesktopAction::MediaPrevious) => {
+             arguments.push(OsString::from("media-previous"));
+         }
+@@ -619,6 +845,7 @@ mod tests {
+         let provider = DesktopProvider {
+             actions: Arc::new(ActionMailbox::default()),
+             states: state_receiver,
++            tools: None,
+         };
+ 
+         assert!(provider.dispatch(DesktopAction::SetVolume(20)));
+@@ -639,6 +866,7 @@ mod tests {
+         let provider = DesktopProvider {
+             actions: Arc::new(ActionMailbox::default()),
+             states: state_receiver,
++            tools: None,
+         };
+ 
+         assert!(provider.dispatch(DesktopAction::SetVolume(20)));
+@@ -660,6 +888,125 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn volume_preview_coalesces_without_swallowing_the_release_feedback() {
++        let (_state_sender, state_receiver) = mpsc::channel();
++        let provider = DesktopProvider {
++            actions: Arc::new(ActionMailbox::default()),
++            states: state_receiver,
++            tools: None,
++        };
++
++        assert!(provider.dispatch(DesktopAction::SetVolumePreview(30)));
++        assert!(provider.dispatch(DesktopAction::SetVolumePreview(60)));
++        assert!(provider.dispatch(DesktopAction::SetVolume(60)));
++        for expected in [
++            DesktopAction::SetVolumePreview(60),
++            DesktopAction::SetVolume(60),
++        ] {
++            assert_eq!(
++                take_action(
++                    &provider.actions,
++                    Instant::now() + Duration::from_millis(10)
++                ),
++                Some(expected)
++            );
++        }
++    }
++
++    #[test]
++    fn brightness_feedback_coalesces_per_control_without_reordering_actions() {
++        let (_state_sender, state_receiver) = mpsc::channel();
++        let provider = DesktopProvider {
++            actions: Arc::new(ActionMailbox::default()),
++            states: state_receiver,
++            tools: None,
++        };
++        for action in [
++            DesktopAction::ShowDisplayBrightness,
++            DesktopAction::ToggleMute,
++            DesktopAction::ShowDisplayBrightness,
++            DesktopAction::ShowKeyboardBacklight,
++            DesktopAction::ShowKeyboardBacklight,
++        ] {
++            assert!(provider.dispatch(action));
++        }
++        let queue = provider.actions.queue.lock().unwrap();
++        assert_eq!(
++            queue.pending,
++            [
++                DesktopAction::ShowDisplayBrightness,
++                DesktopAction::ToggleMute,
++                DesktopAction::ShowKeyboardBacklight
++            ]
++        );
++    }
++
++    #[test]
++    fn tools_poll_only_while_visible_and_mic_refresh_preserves_lesson() {
++        let monitor = Arc::new(ToolsMonitor::default());
++        let (_state_sender, states) = mpsc::channel();
++        let provider = DesktopProvider {
++            actions: Arc::new(ActionMailbox::default()),
++            states,
++            tools: Some(Arc::clone(&monitor)),
++        };
++        let (polled, polls) = mpsc::channel();
++        let (finish_lesson, lesson_pending) = mpsc::channel();
++        let timeout = Duration::from_secs(2);
++        let lesson = LessonStatus {
++            phase: LessonPhase::Class(2),
++            remaining_seconds: Some(120),
++        };
++        let worker_monitor = Arc::clone(&monitor);
++        let worker = thread::spawn(move || {
++            let mut muted = false;
++            tools_worker(
++                &worker_monitor,
++                || {
++                    polled.send("microphone").expect("report microphone poll");
++                    let result = muted;
++                    muted = true;
++                    Some(result)
++                },
++                || {
++                    polled.send("lesson").expect("report lesson poll");
++                    lesson_pending
++                        .recv_timeout(timeout)
++                        .expect("finish lesson poll");
++                    Some(lesson)
++                },
++            );
++        });
++        assert!(matches!(
++            polls.recv_timeout(Duration::from_millis(25)),
++            Err(mpsc::RecvTimeoutError::Timeout)
++        ));
++
++        provider.set_tools_visible(true);
++        assert_eq!(polls.recv_timeout(timeout), Ok("microphone"));
++        assert_eq!(polls.recv_timeout(timeout), Ok("lesson"));
++        monitor.refresh_microphone();
++        assert!(provider.take_tools_status().is_none());
++        finish_lesson.send(()).expect("unblock lesson poll");
++        assert_eq!(polls.recv_timeout(timeout), Ok("microphone"));
++
++        let deadline = Instant::now() + timeout;
++        loop {
++            if let Some(status) = provider.take_tools_status() {
++                assert_eq!(status.microphone_muted, Some(true));
++                assert_eq!(status.lesson, Some(lesson));
++                break;
++            }
++            assert!(Instant::now() < deadline, "fresh Tools state deadline");
++            thread::yield_now();
++        }
++        provider.set_tools_visible(false);
++        assert!(provider.take_tools_status().is_none());
++        drop(provider);
++        worker.join().expect("stop Tools worker");
++    }
++
+     #[test]
+     fn provider_path_requires_an_absolute_executable_file() {
+         let executable = std::env::current_exe().expect("current test executable");
+diff --git a/crates/t1-touchbar/src/lib.rs b/crates/t1-touchbar/src/lib.rs
+index 43722b7..18fcf28 100644
+--- a/crates/t1-touchbar/src/lib.rs
++++ b/crates/t1-touchbar/src/lib.rs
+@@ -1,6 +1,7 @@
+ //! Unprivileged Touch Bar rendering and optional desktop integration.
+ 
+ pub mod builtin_renderer;
++mod cpu_usage;
+ pub mod desktop_provider;
+ pub mod framebuffer;
+ pub mod gesture;
+diff --git a/crates/t1-touchbar/src/stock_art.rs b/crates/t1-touchbar/src/stock_art.rs
+index ad49165..9a1b5f7 100644
+--- a/crates/t1-touchbar/src/stock_art.rs
++++ b/crates/t1-touchbar/src/stock_art.rs
+@@ -7,19 +7,38 @@ use crate::stock_labels::AlphaMask;
+ const SAMPLE_GRID: u32 = 4;
+ const SAMPLE_COUNT: u32 = SAMPLE_GRID * SAMPLE_GRID;
+ const NATIVE_PLATE_HEIGHT: u32 = 60;
++pub(crate) const ACCENT_YELLOW: Rgb = Rgb {
++    red: 245,
++    green: 212,
++    blue: 16,
++};
++pub(crate) const ACCENT_BLUE: Rgb = Rgb {
++    red: 130,
++    green: 156,
++    blue: 255,
++};
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub(crate) enum Symbol {
+     DisplayDown,
+     DisplayUp,
++    Sun,
++    KeyboardLight,
+     KeyboardDown,
+     KeyboardUp,
+     Previous,
+     PlayPause,
+     Next,
+     Mute,
++    Speaker,
+     VolumeDown,
+     VolumeUp,
++    Tux,
++    Back,
++    More,
++    Microphone,
++    MicrophoneMuted,
++    Schedule,
+ }
+ 
+ pub(crate) fn draw_rounded_plate(
+@@ -94,18 +113,309 @@ pub(crate) fn draw_symbol(
+     let mask = match symbol {
+         Symbol::DisplayDown => stock_icons::DISPLAY_DOWN,
+         Symbol::DisplayUp => stock_icons::DISPLAY_UP,
++        Symbol::Sun => return draw_outline_symbol(frame, bounds, color, is_sun_pixel),
++        Symbol::KeyboardLight => {
++            return draw_outline_symbol(frame, bounds, color, is_keyboard_light_pixel);
++        }
+         Symbol::KeyboardDown => stock_icons::KEYBOARD_DOWN,
+         Symbol::KeyboardUp => stock_icons::KEYBOARD_UP,
+         Symbol::Previous => stock_icons::PREVIOUS,
+         Symbol::PlayPause => stock_icons::PLAY_PAUSE,
+         Symbol::Next => stock_icons::NEXT,
+         Symbol::Mute => stock_icons::MUTE,
++        Symbol::Speaker => return draw_outline_symbol(frame, bounds, color, is_speaker_pixel),
+         Symbol::VolumeDown => stock_icons::VOLUME_DOWN,
+         Symbol::VolumeUp => stock_icons::VOLUME_UP,
++        Symbol::Tux => return draw_terminal_symbol(frame, bounds, color),
++        Symbol::Back => return draw_outline_symbol(frame, bounds, color, is_back_pixel),
++        Symbol::More => return draw_outline_symbol(frame, bounds, color, is_ellipsis_pixel),
++        Symbol::Microphone => {
++            return draw_outline_symbol(frame, bounds, color, is_microphone_pixel);
++        }
++        Symbol::MicrophoneMuted => {
++            return draw_outline_symbol(frame, bounds, color, is_microphone_muted_pixel);
++        }
++        Symbol::Schedule => return draw_panel_text(frame, bounds, "STATUS", color),
+     };
+     draw_label(frame, bounds, mask, color)
+ }
+ 
++fn draw_outline_symbol(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    color: Rgb,
++    shape: impl Fn(f64, f64) -> bool,
++) -> Result<(), FramebufferError> {
++    let size = scaled_dimension(36, bounds.height, bounds.width.min(bounds.height));
++    draw_outline_at(
++        frame,
++        Rectangle {
++            x: bounds.x + (bounds.width - size) / 2,
++            y: bounds.y + (bounds.height - size) / 2,
++            width: size,
++            height: size,
++        },
++        color,
++        shape,
++    )
++}
++
++fn draw_outline_at(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    color: Rgb,
++    shape: impl Fn(f64, f64) -> bool,
++) -> Result<(), FramebufferError> {
++    let mask = rasterize(bounds.width, bounds.height, |x, y| {
++        shape(
++            x / f64::from(bounds.width) - 0.5,
++            y / f64::from(bounds.height) - 0.5,
++        )
++    });
++    frame.blend_mask(bounds, &mask, color)
++}
++
++fn is_sun_pixel(x: f64, y: f64) -> bool {
++    let radius = x.hypot(y);
++    let x = x.abs();
++    let y = y.abs();
++    (0.18..=0.25).contains(&radius)
++        || ((0.32..=0.46).contains(&radius) && (x.min(y) <= 0.035 || (x - y).abs() <= 0.045))
++}
++
++fn is_keyboard_light_pixel(x: f64, y: f64) -> bool {
++    let x = x.abs();
++    let height = 0.27 - y;
++    let radius = x.hypot(height);
++    ((0.23..=0.31).contains(&y) && x <= 0.42)
++        || (height >= 0.15
++            && (0.25..=0.42).contains(&radius)
++            && (x <= 0.04 || (x - height).abs() <= 0.048))
++}
++
++fn is_speaker_pixel(x: f64, y: f64) -> bool {
++    let y = y.abs();
++    let cone = (-0.26..=-0.07).contains(&x) && y <= 0.13 + (x + 0.26) * 0.84;
++    let base = (-0.43..=-0.26).contains(&x) && y <= 0.13;
++    let wave = x > -0.01
++        && y <= 0.9 * (x + 0.14)
++        && ((0.24..=0.30).contains(&(x + 0.14).hypot(y))
++            || (0.45..=0.51).contains(&(x + 0.14).hypot(y)));
++    base || cone || wave
++}
++
++fn draw_terminal_symbol(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    color: Rgb,
++) -> Result<(), FramebufferError> {
++    let inset = bounds.width / 12;
++    let available = bounds.width - 2 * inset;
++    let maximum = bounds.height.min(available / 2);
++    if maximum == 0 {
++        return Ok(());
++    }
++    let size = scaled_dimension(48, bounds.height, maximum);
++    let icon = Rectangle {
++        x: bounds.x + inset,
++        y: bounds.y + (bounds.height - size) / 2,
++        width: size,
++        height: size,
++    };
++    draw_tux(frame, icon, color)?;
++    draw_panel_text(
++        frame,
++        Rectangle {
++            x: icon.x + size + inset,
++            width: available - size - inset,
++            ..bounds
++        },
++        ">_",
++        color,
++    )
++}
++
++fn draw_tux(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    white: Rgb,
++) -> Result<(), FramebufferError> {
++    const BLACK: Rgb = Rgb {
++        red: 10,
++        green: 10,
++        blue: 12,
++    };
++    draw_outline_at(frame, bounds, BLACK, |x, y| {
++        ellipse(x, y + 0.24, 0.24, 0.22)
++            || ellipse(x, y - 0.13, 0.29, 0.31)
++            || ellipse(x.abs() - 0.28 - 0.28 * y, y - 0.10, 0.12, 0.23)
++    })?;
++    draw_outline_at(frame, bounds, white, |x, y| {
++        ellipse(x, y - 0.16, 0.21, 0.24) || ellipse(x.abs() - 0.085, y + 0.245, 0.072, 0.10)
++    })?;
++    draw_outline_at(frame, bounds, BLACK, |x, y| {
++        ellipse(x.abs() - 0.057, y + 0.23, 0.029, 0.052)
++    })?;
++    draw_outline_at(frame, bounds, ACCENT_YELLOW, |x, y| {
++        ellipse(x, y + 0.124, 0.145, 0.059) || ellipse(x.abs() - 0.206, y - 0.39, 0.156, 0.077)
++    })
++}
++
++fn ellipse(x: f64, y: f64, radius_x: f64, radius_y: f64) -> bool {
++    (x / radius_x).powi(2) + (y / radius_y).powi(2) <= 1.0
++}
++
++fn is_back_pixel(x: f64, y: f64) -> bool {
++    let y = y.abs();
++    ((-0.28..=0.39).contains(&x) && y <= 0.042) || (y <= 0.27 && (x + 0.28 - y).abs() <= 0.057)
++}
++
++fn is_ellipsis_pixel(x: f64, y: f64) -> bool {
++    x.hypot(y) <= 0.078 || (x.abs() - 0.3).hypot(y) <= 0.078
++}
++
++fn is_microphone_pixel(x: f64, y: f64) -> bool {
++    let capsule_y = y.clamp(-0.29, 0.035);
++    let capsule = x.hypot(y - capsule_y) <= 0.13;
++    let cradle = y >= -0.01 && (0.215..=0.28).contains(&x.hypot(y + 0.01));
++    let stem = x.abs() <= 0.035 && (0.24..=0.39).contains(&y);
++    let base = x.abs() <= 0.16 && (0.365..=0.43).contains(&y);
++    capsule || cradle || stem || base
++}
++
++fn is_microphone_muted_pixel(x: f64, y: f64) -> bool {
++    let slash = (x + y).abs();
++    (slash <= 0.049 && x.abs() <= 0.42) || (slash >= 0.13 && is_microphone_pixel(x, y))
++}
++
++pub(crate) fn draw_panel_text(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    text: &str,
++    color: Rgb,
++) -> Result<(), FramebufferError> {
++    draw_panel_text_runs(frame, bounds, &[(text, color)])
++}
++
++pub(crate) fn draw_panel_text_runs(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    runs: &[(&str, Rgb)],
++) -> Result<(), FramebufferError> {
++    let count = u32::try_from(
++        runs.iter()
++            .map(|(text, _)| text.chars().count())
++            .sum::<usize>(),
++    )
++    .map_err(|_| FramebufferError::InvalidGeometry)?;
++    let columns = count
++        .checked_mul(6)
++        .ok_or(FramebufferError::InvalidGeometry)?
++        .saturating_sub(1);
++    if columns == 0 || columns > bounds.width || bounds.height < 7 {
++        return Ok(());
++    }
++    let pixel = scaled_dimension(4, bounds.height, bounds.height)
++        .min(bounds.width / columns)
++        .min(bounds.height / 7);
++    let width = columns * pixel;
++    let height = 7 * pixel;
++    let left = bounds.x + (bounds.width - width) / 2;
++    let top = bounds.y + (bounds.height - height) / 2;
++    let mut offset = 0;
++    for &(text, color) in runs {
++        let count =
++            u32::try_from(text.chars().count()).map_err(|_| FramebufferError::InvalidGeometry)?;
++        if count == 0 {
++            continue;
++        }
++        let span = count * 6;
++        draw_panel_text_run(
++            frame,
++            Rectangle {
++                x: left + offset * pixel,
++                y: top,
++                width: (span - 1) * pixel,
++                height,
++            },
++            text,
++            pixel,
++            color,
++        )?;
++        offset += span;
++    }
++    Ok(())
++}
++
++fn draw_panel_text_run(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    text: &str,
++    pixel: u32,
++    color: Rgb,
++) -> Result<(), FramebufferError> {
++    let stride = usize::try_from(bounds.width).map_err(|_| FramebufferError::InvalidGeometry)?;
++    let pixel = usize::try_from(pixel).map_err(|_| FramebufferError::InvalidGeometry)?;
++    let length = stride
++        .checked_mul(7 * pixel)
++        .ok_or(FramebufferError::InvalidGeometry)?;
++    let mut mask = vec![0; length];
++    for (index, glyph) in text.chars().map(panel_glyph).enumerate() {
++        for (row, bits) in glyph.into_iter().enumerate() {
++            for column in 0..5 {
++                if bits & (1 << (4 - column)) != 0 {
++                    let x = (index * 6 + column) * pixel;
++                    for y in row * pixel..(row + 1) * pixel {
++                        let start = y * stride + x;
++                        mask[start..start + pixel].fill(u8::MAX);
++                    }
++                }
++            }
++        }
++    }
++    frame.blend_mask(bounds, &mask, color)
++}
++
++fn panel_glyph(character: char) -> [u8; 7] {
++    match character {
++        '0' => [14, 17, 19, 21, 25, 17, 14],
++        '1' => [4, 12, 4, 4, 4, 4, 14],
++        '2' => [14, 17, 1, 2, 4, 8, 31],
++        '3' => [30, 1, 1, 14, 1, 1, 30],
++        '4' => [2, 6, 10, 18, 31, 2, 2],
++        '5' => [31, 16, 16, 30, 1, 1, 30],
++        '6' => [14, 16, 16, 30, 17, 17, 14],
++        '7' => [31, 1, 2, 4, 8, 8, 8],
++        '8' => [14, 17, 17, 14, 17, 17, 14],
++        '9' => [14, 17, 17, 15, 1, 1, 14],
++        'A' => [14, 17, 17, 31, 17, 17, 17],
++        'B' => [30, 17, 17, 30, 17, 17, 30],
++        'C' => [14, 17, 16, 16, 16, 17, 14],
++        'D' => [30, 17, 17, 17, 17, 17, 30],
++        'E' => [31, 16, 16, 30, 16, 16, 31],
++        'F' => [31, 16, 16, 30, 16, 16, 16],
++        'I' => [14, 4, 4, 4, 4, 4, 14],
++        'N' => [17, 25, 25, 21, 19, 19, 17],
++        'P' => [30, 17, 17, 30, 16, 16, 16],
++        'R' => [30, 17, 17, 30, 20, 18, 17],
++        'S' => [15, 16, 16, 14, 1, 1, 30],
++        'T' => [31, 4, 4, 4, 4, 4, 4],
++        'U' => [17, 17, 17, 17, 17, 17, 14],
++        'Z' => [31, 1, 2, 4, 8, 16, 31],
++        'e' => [0, 0, 14, 17, 31, 16, 14],
++        'i' => [4, 0, 12, 4, 4, 4, 14],
++        't' => [8, 8, 30, 8, 8, 9, 6],
++        '.' => [0, 0, 0, 0, 0, 4, 4],
++        ':' => [0, 4, 4, 0, 4, 4, 0],
++        '%' => [17, 18, 2, 4, 8, 9, 17],
++        '>' => [16, 8, 4, 2, 4, 8, 16],
++        '_' => [0, 0, 0, 0, 0, 0, 31],
++        '-' => [0, 0, 0, 14, 0, 0, 0],
++        '°' => [12, 18, 12, 0, 0, 0, 0],
++        _ => [0; 7],
++    }
++}
++
+ fn scaled_dimension(native: u32, plate_height: u32, maximum: u32) -> u32 {
+     u32::try_from(
+         (u64::from(native) * u64::from(plate_height)).div_ceil(u64::from(NATIVE_PLATE_HEIGHT)),
+diff --git a/crates/t1-touchbar/src/stock_slice.rs b/crates/t1-touchbar/src/stock_slice.rs
+index 4c0ae87..7ef15cd 100644
+--- a/crates/t1-touchbar/src/stock_slice.rs
++++ b/crates/t1-touchbar/src/stock_slice.rs
+@@ -4,16 +4,33 @@ use std::{error::Error, fmt};
+ 
+ use crate::framebuffer::{FramebufferError, Rectangle, Rgb, Xrgb8888Frame};
+ use crate::gesture::{DisplayContact, Gesture};
+-use crate::stock_art::{self, Symbol};
++use crate::stock_art::{self, ACCENT_BLUE, ACCENT_YELLOW, Symbol};
+ use crate::stock_labels::{self, AlphaMask};
+ 
+ const NATIVE_WIDTH: u32 = 2_170;
+ const NATIVE_HEIGHT: u32 = 60;
+-const ACTIVE_RIGHT: u32 = NATIVE_WIDTH;
++const SHORTCUTS_LEFT: u32 = 1_920;
++const SHORTCUTS: [(StockCapabilities, StockAction, &str); 2] = [
++    (
++        StockCapabilities::SHORTCUT_ONE,
++        StockAction::OpenShortcutOne,
++        "WEB 1",
++    ),
++    (
++        StockCapabilities::SHORTCUT_TWO,
++        StockAction::OpenShortcutTwo,
++        "WEB 2",
++    ),
++];
+ const FUNCTION_SLOT_COUNT: u32 = 13;
+ const PLATE_Y: u32 = 0;
+ const PLATE_HEIGHT: u32 = 60;
+ const PLATE_RADIUS: u32 = 8;
++const MAX_SLIDER_LEVEL: u8 = 100;
++const MAIN_SLIDER_LEFT: u32 = 194;
++const PANEL_SLIDER_LEFT: u32 = 390;
++const SLIDER_WIDTH: u32 = 680;
++const CPU_READOUT_DESIGN_WIDTH: u32 = 510;
+ 
+ const BACKGROUND: Rgb = Rgb {
+     red: 0,
+@@ -35,6 +52,26 @@ const LABEL: Rgb = Rgb {
+     green: 242,
+     blue: 242,
+ };
++const SLIDER_TRACK: Rgb = Rgb {
++    red: 94,
++    green: 94,
++    blue: 94,
++};
++const SLIDER_FILL: Rgb = Rgb {
++    red: 111,
++    green: 185,
++    blue: 255,
++};
++const MUTED_FILL: Rgb = Rgb {
++    red: 135,
++    green: 135,
++    blue: 135,
++};
++const MUTED_LABEL: Rgb = Rgb {
++    red: 255,
++    green: 211,
++    blue: 100,
++};
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub enum FunctionKey {
+@@ -67,6 +104,10 @@ impl StockCapabilities {
+     pub const KEYBOARD_BACKLIGHT: Self = Self(2);
+     pub const AUDIO: Self = Self(4);
+     pub const MEDIA: Self = Self(8);
++    pub const EXTENDED_CONTROLS: Self = Self(16);
++    pub const SHORTCUT_ONE: Self = Self(32);
++    pub const SHORTCUT_TWO: Self = Self(64);
++    pub const SCHEDULE: Self = Self(128);
+ 
+     #[must_use]
+     pub const fn contains(self, capability: Self) -> bool {
+@@ -82,14 +123,89 @@ impl std::ops::BitOr for StockCapabilities {
+     }
+ }
+ 
+-/// Renderer-known desktop levels. The fixed Boot Camp face uses mute only;
+-/// the remaining values stay available to replacement renderers and providers.
++/// Renderer-known desktop levels.
+ #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+ pub struct StockLevels {
+     pub display_brightness: Option<u8>,
+     pub keyboard_backlight: Option<u8>,
+     pub volume: Option<u8>,
+     pub muted: bool,
++    pub microphone_muted: Option<bool>,
++    pub cpu_temperature: Option<i16>,
++    pub cpu_cores: [Option<u8>; 2],
++    pub lesson: Option<LessonStatus>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum LessonPhase {
++    Class(u8),
++    Break(u8),
++    BeforeSchool,
++    AfterSchool,
++    Free,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct LessonStatus {
++    pub phase: LessonPhase,
++    pub remaining_seconds: Option<u32>,
++}
++
++impl LessonStatus {
++    fn label_parts(self) -> (String, Option<String>) {
++        let title = match self.phase {
++            LessonPhase::Class(hour) => format!("CLASS {hour}"),
++            LessonPhase::Break(_) => String::from("BREAK"),
++            LessonPhase::BeforeSchool => String::from("START"),
++            LessonPhase::AfterSchool => return (String::from("DONE"), None),
++            LessonPhase::Free => return (String::from("FREE"), None),
++        };
++        let countdown = self
++            .remaining_seconds
++            .map(|remaining| format!("{:02}:{:02}", remaining / 60, remaining % 60));
++        (title, countdown)
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum SliderControl {
++    DisplayBrightness,
++    KeyboardBacklight,
++    Volume,
++}
++
++impl SliderControl {
++    const fn capability(self) -> StockCapabilities {
++        match self {
++            Self::DisplayBrightness => StockCapabilities::DISPLAY_BRIGHTNESS,
++            Self::KeyboardBacklight => StockCapabilities::KEYBOARD_BACKLIGHT,
++            Self::Volume => StockCapabilities::AUDIO,
++        }
++    }
++
++    const fn minimum(self) -> u8 {
++        match self {
++            Self::DisplayBrightness => 5,
++            Self::KeyboardBacklight | Self::Volume => 0,
++        }
++    }
++
++    const fn level(self, levels: StockLevels) -> Option<u8> {
++        match self {
++            Self::DisplayBrightness => levels.display_brightness,
++            Self::KeyboardBacklight => levels.keyboard_backlight,
++            Self::Volume => levels.volume,
++        }
++    }
++
++    const fn symbol(self, muted: bool) -> Symbol {
++        match self {
++            Self::DisplayBrightness => Symbol::Sun,
++            Self::KeyboardBacklight => Symbol::KeyboardLight,
++            Self::Volume if muted => Symbol::Mute,
++            Self::Volume => Symbol::Speaker,
++        }
++    }
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -103,6 +219,15 @@ pub enum StockAction {
+     MediaPrevious,
+     MediaPlayPause,
+     MediaNext,
++    OpenTerminal,
++    OpenSlider(SliderControl),
++    CloseSlider,
++    OpenTools,
++    ToggleMicrophoneMute,
++    LaunchSchedule,
++    OpenShortcutOne,
++    OpenShortcutTwo,
++    OpenSystemMonitor,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -149,6 +274,12 @@ enum Control {
+     Mute,
+     VolumeDown,
+     VolumeUp,
++    Terminal,
++    OpenSlider(SliderControl),
++    CloseSlider,
++    OpenTools,
++    Microphone,
++    Schedule,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -211,6 +342,72 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
+     },
+ ];
+ 
++const COLLAPSED_CONTROLS: [NativeControl; 4] = [
++    NativeControl {
++        control: Control::OpenSlider(SliderControl::KeyboardBacklight),
++        x: 958,
++        width: 226,
++    },
++    NativeControl {
++        control: Control::OpenSlider(SliderControl::Volume),
++        x: 1_200,
++        width: 226,
++    },
++    NativeControl {
++        control: Control::Terminal,
++        x: 1_442,
++        width: 226,
++    },
++    NativeControl {
++        control: Control::OpenTools,
++        x: 1_684,
++        width: 226,
++    },
++];
++
++const CLOSE_SLIDER: NativeControl = NativeControl {
++    control: Control::CloseSlider,
++    x: 194,
++    width: 176,
++};
++const EXPANDED_CONTROLS: [NativeControl; 1] = [CLOSE_SLIDER];
++const EXPANDED_VOLUME_CONTROLS: [NativeControl; 2] = [
++    CLOSE_SLIDER,
++    NativeControl {
++        control: Control::Mute,
++        x: 1_088,
++        width: 180,
++    },
++];
++const TOOLS_CONTROLS: [NativeControl; 6] = [
++    CLOSE_SLIDER,
++    NativeControl {
++        control: Control::MediaPrevious,
++        x: 390,
++        width: 140,
++    },
++    NativeControl {
++        control: Control::MediaPlayPause,
++        x: 546,
++        width: 140,
++    },
++    NativeControl {
++        control: Control::MediaNext,
++        x: 702,
++        width: 140,
++    },
++    NativeControl {
++        control: Control::Microphone,
++        x: 858,
++        width: 140,
++    },
++    NativeControl {
++        control: Control::Schedule,
++        x: 1_014,
++        width: 356,
++    },
++];
++
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ struct LaidOutControl {
+     control: Control,
+@@ -223,6 +420,8 @@ pub struct StockBar {
+     width: u32,
+     height: u32,
+     capabilities: StockCapabilities,
++    open_slider: Option<SliderControl>,
++    tools: bool,
+ }
+ 
+ impl StockBar {
+@@ -241,6 +440,8 @@ impl StockBar {
+                 width,
+                 height,
+                 capabilities,
++                open_slider: None,
++                tools: false,
+             })
+         }
+     }
+@@ -255,6 +456,43 @@ impl StockBar {
+         self.height
+     }
+ 
++    #[must_use]
++    pub const fn with_open_slider(mut self, open: Option<SliderControl>) -> Self {
++        self.open_slider = open;
++        self
++    }
++
++    #[must_use]
++    pub const fn open_slider(self) -> Option<SliderControl> {
++        match self.open_slider {
++            Some(control)
++                if self
++                    .capabilities
++                    .contains(StockCapabilities::EXTENDED_CONTROLS)
++                    && self.capabilities.contains(control.capability())
++                    && !matches!(control, SliderControl::DisplayBrightness)
++                    && !self.tools_open() =>
++            {
++                Some(control)
++            }
++            _ => None,
++        }
++    }
++
++    #[must_use]
++    pub const fn with_tools(mut self, open: bool) -> Self {
++        self.tools = open;
++        self
++    }
++
++    #[must_use]
++    pub const fn tools_open(self) -> bool {
++        self.tools
++            && self
++                .capabilities
++                .contains(StockCapabilities::EXTENDED_CONTROLS)
++    }
++
+     #[must_use]
+     pub(crate) fn escape_right(self) -> u32 {
+         let bounds = self.escape_bounds();
+@@ -290,10 +528,25 @@ impl StockBar {
+         }
+         frame.clear(BACKGROUND);
+         if fn_held {
+-            self.render_function_row(frame, pressed)
++            self.render_function_row(frame, pressed)?;
+         } else {
+-            self.render_normal_row(frame, levels, pressed)
++            self.render_normal_row(frame, levels, pressed)?;
+         }
++        for (index, (capability, _, label)) in SHORTCUTS.into_iter().enumerate() {
++            if self.capabilities.contains(capability) {
++                let bounds = self.shortcut_bounds(index);
++                if bounds.width > 0 {
++                    stock_art::draw_rounded_plate(
++                        frame,
++                        bounds,
++                        self.scaled_y(PLATE_RADIUS),
++                        PLATE,
++                    )?;
++                    stock_art::draw_panel_text(frame, bounds, label, LABEL)?;
++                }
++            }
++        }
++        Ok(())
+     }
+ 
+     /// Maps a completed tap to one currently visible action.
+@@ -302,7 +555,37 @@ impl StockBar {
+         let Gesture::Tap(contact) = gesture else {
+             return None;
+         };
+-        self.action_at(contact, fn_held)
++        self.shortcut_tap(contact)
++            .or_else(|| self.action_at(contact, fn_held))
++            .or_else(|| {
++                (!fn_held
++                    && self.open_slider().is_some()
++                    && contact.x() < f64::from(self.active_right())
++                    && contact.y() < f64::from(self.height)
++                    && self.slider_at(contact).is_none())
++                .then_some(StockAction::CloseSlider)
++            })
++    }
++
++    fn shortcut_tap(self, contact: DisplayContact) -> Option<StockAction> {
++        SHORTCUTS
++            .into_iter()
++            .enumerate()
++            .find_map(|(index, (capability, action, _))| {
++                let bounds = self.shortcut_bounds(index);
++                (self.capabilities.contains(capability)
++                    && contains(
++                        bounds,
++                        display_coordinate(contact.x()),
++                        display_coordinate(contact.y()),
++                    ))
++                .then_some(action)
++            })
++    }
++
++    fn shortcut_bounds(self, index: usize) -> Rectangle {
++        let offset = if index == 0 { 0 } else { 125 };
++        self.native_control_bounds(SHORTCUTS_LEFT + offset, 116)
+     }
+ 
+     /// Maps an active display contact to the control beneath it.
+@@ -319,28 +602,210 @@ impl StockBar {
+         if contains(self.escape_bounds(), x, y) {
+             return Some(StockAction::Escape);
+         }
++        if self.tools_open() && contains(self.cpu_readout_bounds(), x, y) {
++            return Some(StockAction::OpenSystemMonitor);
++        }
+         self.normal_controls()
+             .into_iter()
+             .find(|item| self.control_available(item.control) && contains(item.bounds, x, y))
+             .map(|item| control_action(item.control))
+     }
+ 
++    /// Finds the slider under a new contact and its absolute level.
++    #[must_use]
++    pub fn slider_at(self, contact: DisplayContact) -> Option<(SliderControl, u8)> {
++        let x = display_coordinate(contact.x());
++        let y = display_coordinate(contact.y());
++        let control = self.active_slider()?;
++        if !contains(self.slider_bounds(control)?, x, y) {
++            return None;
++        }
++        Some((control, self.slider_level(control, contact.x())?))
++    }
++
++    /// Updates an already captured slider, clamping motion beyond the track.
++    #[must_use]
++    pub fn slider_level(self, control: SliderControl, x: f64) -> Option<u8> {
++        if !x.is_finite() {
++            return None;
++        }
++        self.slider_bounds(control)?;
++        let track = self.slider_track(control);
++        let position = display_coordinate(x)
++            .saturating_sub(track.x)
++            .min(track.width.saturating_sub(1));
++        let minimum = control.minimum();
++        let span = u32::from(MAX_SLIDER_LEVEL - minimum);
++        let level = scale(position, span, track.width.saturating_sub(1).max(1));
++        Some(minimum + u8::try_from(level).ok()?)
++    }
++
+     fn render_normal_row(
+         self,
+         frame: &mut Xrgb8888Frame<'_>,
+-        _levels: StockLevels,
++        levels: StockLevels,
+         pressed: Option<StockAction>,
+     ) -> Result<(), StockSliceError> {
+         self.draw_plate(frame, self.escape_bounds(), StockAction::Escape, pressed)?;
+         stock_art::draw_label(frame, self.escape_bounds(), stock_labels::ESC, LABEL)?;
++        if let Some(control) = self.active_slider()
++            && let Some(bounds) = self.slider_bounds(control)
++        {
++            self.draw_slider(frame, control, bounds, levels)?;
++        }
++        if self.tools_open() {
++            let bounds = self.cpu_readout_bounds();
++            if bounds.width != 0 {
++                self.draw_plate(frame, bounds, StockAction::OpenSystemMonitor, pressed)?;
++                Self::draw_cpu_readout(frame, bounds, levels)?;
++            }
++        }
+         for item in self.normal_controls() {
+-            if !self.control_visible(item.control) {
++            if item.bounds.width == 0 || !self.control_visible(item.control) {
+                 continue;
+             }
+             let action = control_action(item.control);
+             self.draw_plate(frame, item.bounds, action, pressed)?;
+-            let symbol = control_symbol(item.control);
+-            stock_art::draw_symbol(frame, item.bounds, symbol, LABEL)?;
++            if item.control == Control::Schedule
++                && let Some(lesson) = levels.lesson
++            {
++                let (phase, countdown) = lesson.label_parts();
++                if let Some(countdown) = countdown {
++                    stock_art::draw_panel_text_runs(
++                        frame,
++                        item.bounds,
++                        &[
++                            (&phase, ACCENT_YELLOW),
++                            (" ", LABEL),
++                            (&countdown, ACCENT_BLUE),
++                        ],
++                    )?;
++                } else {
++                    stock_art::draw_panel_text(frame, item.bounds, &phase, ACCENT_YELLOW)?;
++                }
++                continue;
++            }
++            let symbol = control_symbol(item.control, self.open_slider(), levels);
++            let color = match item.control {
++                Control::Microphone if levels.microphone_muted == Some(true) => MUTED_LABEL,
++                Control::MediaPrevious | Control::MediaPlayPause | Control::MediaNext
++                    if self.tools_open() && !self.control_available(item.control) =>
++                {
++                    MUTED_FILL
++                }
++                Control::Mute | Control::OpenSlider(SliderControl::Volume)
++                    if levels.muted
++                        && self
++                            .capabilities
++                            .contains(StockCapabilities::EXTENDED_CONTROLS) =>
++                {
++                    MUTED_LABEL
++                }
++                _ => LABEL,
++            };
++            stock_art::draw_symbol(frame, item.bounds, symbol, color)?;
++        }
++        Ok(())
++    }
++
++    fn cpu_readout_bounds(self) -> Rectangle {
++        self.native_control_bounds(1_390, CPU_READOUT_DESIGN_WIDTH)
++    }
++
++    fn draw_cpu_readout(
++        frame: &mut Xrgb8888Frame<'_>,
++        bounds: Rectangle,
++        levels: StockLevels,
++    ) -> Result<(), StockSliceError> {
++        let inside = |x, y, width, height| {
++            let left = scale(x, bounds.width, CPU_READOUT_DESIGN_WIDTH);
++            let top = scale(y, bounds.height, PLATE_HEIGHT);
++            Rectangle {
++                x: bounds.x + left,
++                y: bounds.y + top,
++                width: scale(x + width, bounds.width, CPU_READOUT_DESIGN_WIDTH) - left,
++                height: scale(y + height, bounds.height, PLATE_HEIGHT) - top,
++            }
++        };
++        let temperature = levels.cpu_temperature.map_or_else(
++            || String::from("CPU -- °C"),
++            |value| format!("CPU {value} °C"),
++        );
++        let label = inside(0, 0, 194, PLATE_HEIGHT);
++        stock_art::draw_panel_text(frame, label, &temperature, LABEL)?;
++
++        for ((core, y), usage) in [(1, 4), (2, 32)].into_iter().zip(levels.cpu_cores) {
++            let track = inside(210, y + 7, 180, 10);
++            if track.width != 0 && track.height != 0 {
++                let radius = track.height / 2;
++                stock_art::draw_rounded_plate(frame, track, radius, SLIDER_TRACK)?;
++                if let Some(usage) = usage {
++                    let width = scale(u32::from(usage.min(100)), track.width, 100);
++                    if width != 0 {
++                        let fill = Rectangle { width, ..track };
++                        stock_art::draw_rounded_plate(frame, fill, radius, SLIDER_FILL)?;
++                    }
++                }
++            }
++            let label = usage.map_or_else(
++                || format!("{core} --%"),
++                |usage| format!("{core} {}%", usage.min(100)),
++            );
++            let bounds = inside(399, y, 111, 24);
++            stock_art::draw_panel_text(frame, bounds, &label, LABEL)?;
++        }
++        Ok(())
++    }
++
++    fn draw_slider(
++        self,
++        frame: &mut Xrgb8888Frame<'_>,
++        control: SliderControl,
++        bounds: Rectangle,
++        levels: StockLevels,
++    ) -> Result<(), StockSliceError> {
++        stock_art::draw_rounded_plate(frame, bounds, self.scaled_y(PLATE_RADIUS).max(1), PLATE)?;
++        if control != SliderControl::Volume {
++            let icon = self.native_control_bounds(Self::slider_left(control) + 8, 72);
++            if icon.width != 0 {
++                stock_art::draw_symbol(frame, icon, control.symbol(false), LABEL)?;
++            }
++        }
++        let track = self.slider_track(control);
++        if track.width == 0 {
++            return Ok(());
++        }
++        let track_radius = track.height / 2;
++        stock_art::draw_rounded_plate(frame, track, track_radius, SLIDER_TRACK)?;
++        if let Some(level) = control.level(levels) {
++            let minimum = control.minimum();
++            let level = level.clamp(minimum, MAX_SLIDER_LEVEL);
++            let position = scale(
++                u32::from(level - minimum),
++                track.width - 1,
++                u32::from(MAX_SLIDER_LEVEL - minimum),
++            );
++            let fill = Rectangle {
++                width: position + 1,
++                ..track
++            };
++            let muted = control == SliderControl::Volume && levels.muted;
++            let color = if muted { MUTED_FILL } else { SLIDER_FILL };
++            stock_art::draw_rounded_plate(frame, fill, track_radius, color)?;
++            let diameter = self
++                .scaled_y(24)
++                .max(1)
++                .min(bounds.width)
++                .min(bounds.height);
++            let knob = Rectangle {
++                x: (track.x + position)
++                    .saturating_sub(diameter / 2)
++                    .clamp(bounds.x, bounds.x + bounds.width - diameter),
++                y: bounds.y + (bounds.height - diameter) / 2,
++                width: diameter,
++                height: diameter,
++            };
++            stock_art::draw_rounded_plate(frame, knob, diameter / 2, LABEL)?;
+         }
+         Ok(())
+     }
+@@ -415,20 +880,89 @@ impl StockBar {
+     }
+ 
+     fn normal_controls(self) -> Vec<LaidOutControl> {
+-        NORMAL_CONTROLS
+-            .into_iter()
++        let extended = self
++            .capabilities
++            .contains(StockCapabilities::EXTENDED_CONTROLS);
++        let controls = if self.tools_open() {
++            &TOOLS_CONTROLS[..]
++        } else if extended {
++            match self.open_slider() {
++                Some(SliderControl::Volume) => &EXPANDED_VOLUME_CONTROLS[..],
++                Some(_) => &EXPANDED_CONTROLS[..],
++                None => &COLLAPSED_CONTROLS[..],
++            }
++        } else {
++            &NORMAL_CONTROLS[..]
++        };
++        controls
++            .iter()
+             .map(|item| LaidOutControl {
+                 control: item.control,
+-                bounds: Rectangle {
+-                    x: self.scaled_x(item.x),
+-                    y: self.scaled_y(PLATE_Y),
+-                    width: self.scaled_x(item.width).max(1),
+-                    height: self.scaled_y(PLATE_HEIGHT).max(1),
++                bounds: if extended {
++                    self.native_control_bounds(item.x, item.width)
++                } else {
++                    Rectangle {
++                        x: self.scaled_x(item.x),
++                        y: self.scaled_y(PLATE_Y),
++                        width: self.scaled_x(item.width).max(1),
++                        height: self.scaled_y(PLATE_HEIGHT).max(1),
++                    }
+                 },
+             })
+             .collect()
+     }
+ 
++    fn native_control_bounds(self, x: u32, width: u32) -> Rectangle {
++        self.native_bounds(x, PLATE_Y, width, PLATE_HEIGHT)
++    }
++
++    fn native_bounds(self, x: u32, y: u32, width: u32, height: u32) -> Rectangle {
++        let left = self.scaled_x(x);
++        let top = self.scaled_y(y);
++        Rectangle {
++            x: left,
++            y: top,
++            width: self.scaled_x(x + width) - left,
++            height: self.scaled_y(y + height) - top,
++        }
++    }
++
++    fn active_slider(self) -> Option<SliderControl> {
++        self.open_slider().or_else(|| {
++            (!self.tools_open()
++                && self.capabilities.contains(
++                    StockCapabilities::EXTENDED_CONTROLS | StockCapabilities::DISPLAY_BRIGHTNESS,
++                ))
++            .then_some(SliderControl::DisplayBrightness)
++        })
++    }
++
++    const fn slider_left(control: SliderControl) -> u32 {
++        match control {
++            SliderControl::DisplayBrightness => MAIN_SLIDER_LEFT,
++            SliderControl::KeyboardBacklight | SliderControl::Volume => PANEL_SLIDER_LEFT,
++        }
++    }
++
++    fn slider_bounds(self, control: SliderControl) -> Option<Rectangle> {
++        let bounds = self.native_control_bounds(Self::slider_left(control), SLIDER_WIDTH);
++        (self.active_slider() == Some(control) && bounds.width != 0).then_some(bounds)
++    }
++
++    fn slider_track(self, control: SliderControl) -> Rectangle {
++        let icon_inset = if control == SliderControl::Volume {
++            30
++        } else {
++            94
++        };
++        let track_left = Self::slider_left(control) + icon_inset;
++        let mut bounds = self.native_control_bounds(track_left, SLIDER_WIDTH - icon_inset - 30);
++        let height = self.scaled_y(8).max(1);
++        bounds.y += (bounds.height - height) / 2;
++        bounds.height = height;
++        bounds
++    }
++
+     const fn control_available(self, control: Control) -> bool {
+         match control {
+             Control::DisplayDown | Control::DisplayUp => self
+@@ -443,18 +977,40 @@ impl StockBar {
+             Control::Mute | Control::VolumeDown | Control::VolumeUp => {
+                 self.capabilities.contains(StockCapabilities::AUDIO)
+             }
++            Control::Terminal | Control::OpenTools => self
++                .capabilities
++                .contains(StockCapabilities::EXTENDED_CONTROLS),
++            Control::OpenSlider(slider) => self.capabilities.contains(slider.capability()),
++            Control::CloseSlider => self.open_slider().is_some() || self.tools_open(),
++            Control::Microphone => self.tools_open(),
++            Control::Schedule => {
++                self.tools_open() && self.capabilities.contains(StockCapabilities::SCHEDULE)
++            }
+         }
+     }
+ 
+     const fn control_visible(self, control: Control) -> bool {
+-        matches!(
+-            control,
+-            Control::MediaPrevious | Control::MediaPlayPause | Control::MediaNext
+-        ) || self.control_available(control)
++        self.control_available(control)
++            || ((self.tools_open()
++                || !self
++                    .capabilities
++                    .contains(StockCapabilities::EXTENDED_CONTROLS))
++                && matches!(
++                    control,
++                    Control::MediaPrevious | Control::MediaPlayPause | Control::MediaNext
++                ))
+     }
+ 
+     fn active_right(self) -> u32 {
+-        scale(ACTIVE_RIGHT, self.width, NATIVE_WIDTH).max(1)
++        let right = if self
++            .capabilities
++            .contains(StockCapabilities::EXTENDED_CONTROLS)
++        {
++            SHORTCUTS_LEFT
++        } else {
++            NATIVE_WIDTH
++        };
++        self.scaled_x(right).max(1)
+     }
+ 
+     fn scaled_x(self, value: u32) -> u32 {
+@@ -503,10 +1059,20 @@ const fn control_action(control: Control) -> StockAction {
+         Control::Mute => StockAction::ToggleMute,
+         Control::VolumeDown => StockAction::StepVolume(StepDirection::Down),
+         Control::VolumeUp => StockAction::StepVolume(StepDirection::Up),
++        Control::Terminal => StockAction::OpenTerminal,
++        Control::OpenSlider(slider) => StockAction::OpenSlider(slider),
++        Control::CloseSlider => StockAction::CloseSlider,
++        Control::OpenTools => StockAction::OpenTools,
++        Control::Microphone => StockAction::ToggleMicrophoneMute,
++        Control::Schedule => StockAction::LaunchSchedule,
+     }
+ }
+ 
+-const fn control_symbol(control: Control) -> Symbol {
++const fn control_symbol(
++    control: Control,
++    open: Option<SliderControl>,
++    levels: StockLevels,
++) -> Symbol {
+     match control {
+         Control::DisplayDown => Symbol::DisplayDown,
+         Control::DisplayUp => Symbol::DisplayUp,
+@@ -515,9 +1081,21 @@ const fn control_symbol(control: Control) -> Symbol {
+         Control::MediaPrevious => Symbol::Previous,
+         Control::MediaPlayPause => Symbol::PlayPause,
+         Control::MediaNext => Symbol::Next,
++        Control::Mute if matches!(open, Some(SliderControl::Volume)) => {
++            SliderControl::Volume.symbol(levels.muted)
++        }
+         Control::Mute => Symbol::Mute,
+         Control::VolumeDown => Symbol::VolumeDown,
+         Control::VolumeUp => Symbol::VolumeUp,
++        Control::Terminal => Symbol::Tux,
++        Control::OpenSlider(slider) => slider.symbol(levels.muted),
++        Control::CloseSlider => Symbol::Back,
++        Control::OpenTools => Symbol::More,
++        Control::Microphone if matches!(levels.microphone_muted, Some(true)) => {
++            Symbol::MicrophoneMuted
++        }
++        Control::Microphone => Symbol::Microphone,
++        Control::Schedule => Symbol::Schedule,
+     }
+ }
+ 
+@@ -623,6 +1201,282 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn compact_view_keeps_display_slider_escape_and_fn() {
++        let legacy = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, all()).unwrap();
++        let extended = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap();
++        let contact = |x| DisplayContact::new(1, x, 30.0).unwrap();
++        assert_eq!(
++            legacy
++                .with_open_slider(Some(SliderControl::Volume))
++                .open_slider(),
++            None
++        );
++        assert_eq!(legacy.slider_at(contact(194.0)), None);
++        assert_eq!(extended.slider_at(contact(193.0)), None);
++        assert_eq!(
++            extended.slider_at(contact(194.0)),
++            Some((SliderControl::DisplayBrightness, 5))
++        );
++        assert_eq!(
++            extended.slider_at(contact(873.0)),
++            Some((SliderControl::DisplayBrightness, 100))
++        );
++        assert_eq!(extended.slider_at(contact(874.0)), None);
++        assert_eq!(extended.action_at(contact(850.0), false), None);
++        assert_eq!(
++            extended.action_at(contact(80.0), false),
++            Some(StockAction::Escape)
++        );
++        for (x, control) in [
++            (1_067.0, SliderControl::KeyboardBacklight),
++            (1_313.0, SliderControl::Volume),
++        ] {
++            assert_eq!(
++                extended.action_at(contact(x), false),
++                Some(StockAction::OpenSlider(control))
++            );
++        }
++        assert_eq!(
++            extended.action_at(contact(1_637.0), false),
++            Some(StockAction::OpenTerminal)
++        );
++        assert_eq!(
++            extended.action_at(contact(1_830.0), false),
++            Some(StockAction::OpenTools)
++        );
++        assert_eq!(
++            extended.action_at(contact(1_845.0), true),
++            Some(StockAction::Function(FunctionKey::F12))
++        );
++        assert_eq!(extended.action_at(contact(1_920.0), false), None);
++        assert_eq!(extended.action_at(contact(1_920.0), true), None);
++    }
++
++    #[test]
++    fn tools_page_keeps_media_conditional_and_cpu_monitor_inside_its_tile() {
++        let bar = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap()
++        .with_open_slider(Some(SliderControl::Volume))
++        .with_tools(true);
++        let contact = |x| DisplayContact::new(1, x, 30.0).unwrap();
++        assert!(bar.tools_open());
++        assert_eq!(bar.open_slider(), None);
++        assert_eq!(bar.slider_at(contact(450.0)), None);
++        for (x, action) in [
++            (280.0, StockAction::CloseSlider),
++            (460.0, StockAction::MediaPrevious),
++            (616.0, StockAction::MediaPlayPause),
++            (772.0, StockAction::MediaNext),
++            (928.0, StockAction::ToggleMicrophoneMute),
++        ] {
++            assert_eq!(bar.action_at(contact(x), false), Some(action));
++        }
++        assert_eq!(bar.action_at(contact(1_192.0), false), None);
++        let configured = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS | StockCapabilities::SCHEDULE,
++        )
++        .unwrap()
++        .with_tools(true);
++        assert_eq!(
++            configured.action_at(contact(1_192.0), false),
++            Some(StockAction::LaunchSchedule)
++        );
++        for x in [1_390.0, 1_880.0, 1_899.0] {
++            assert_eq!(
++                bar.action_for_gesture(tap(x, 30.0), false),
++                Some(StockAction::OpenSystemMonitor)
++            );
++        }
++        assert_eq!(bar.action_at(contact(1_389.0), false), None);
++        assert_eq!(bar.action_at(contact(1_900.0), false), None);
++        assert_eq!(
++            bar.action_at(contact(1_880.0), true),
++            Some(StockAction::Function(FunctionKey::F12))
++        );
++        assert_eq!(
++            bar.with_tools(false)
++                .with_open_slider(None)
++                .action_at(contact(1_880.0), false),
++            Some(StockAction::OpenTools)
++        );
++        let no_media = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap()
++        .with_tools(true);
++        assert!(no_media.control_visible(Control::MediaPrevious));
++        assert_eq!(no_media.action_at(contact(460.0), false), None);
++    }
++
++    #[test]
++    fn expanded_panels_show_only_one_slider_and_mute_is_volume_only() {
++        let bar = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap();
++        let contact = |x| DisplayContact::new(1, x, 30.0).unwrap();
++        for control in [SliderControl::KeyboardBacklight, SliderControl::Volume] {
++            let opened = bar.with_open_slider(Some(control));
++            assert_eq!(opened.open_slider(), Some(control));
++            assert_eq!(
++                opened.action_at(contact(80.0), false),
++                Some(StockAction::Escape)
++            );
++            assert_eq!(
++                opened.action_at(contact(280.0), false),
++                Some(StockAction::CloseSlider)
++            );
++            assert_eq!(opened.slider_at(contact(389.0)), None);
++            assert_eq!(opened.slider_at(contact(390.0)), Some((control, 0)));
++            assert_eq!(opened.slider_at(contact(1_069.0)), Some((control, 100)));
++            assert_eq!(opened.slider_at(contact(1_070.0)), None);
++            assert_eq!(
++                opened.action_at(contact(1_178.0), false),
++                (control == SliderControl::Volume).then_some(StockAction::ToggleMute)
++            );
++            assert_eq!(
++                opened.action_at(contact(1_845.0), true),
++                Some(StockAction::Function(FunctionKey::F12))
++            );
++            assert_eq!(opened.action_at(contact(1_920.0), true), None);
++        }
++    }
++
++    #[test]
++    fn blank_taps_close_open_slider_without_stealing_other_controls() {
++        let bar = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap()
++        .with_open_slider(Some(SliderControl::Volume));
++        assert_eq!(
++            bar.action_for_gesture(tap(1_450.0, 30.0), false),
++            Some(StockAction::CloseSlider)
++        );
++        assert_eq!(
++            bar.action_for_gesture(tap(80.0, 30.0), false),
++            Some(StockAction::Escape)
++        );
++        assert_eq!(
++            bar.action_for_gesture(tap(1_178.0, 30.0), false),
++            Some(StockAction::ToggleMute)
++        );
++        assert_eq!(bar.action_for_gesture(tap(500.0, 30.0), false), None);
++        assert_eq!(bar.action_for_gesture(tap(1_920.0, 30.0), false), None);
++        assert_eq!(
++            bar.action_for_gesture(
++                Gesture::Press(DisplayContact::new(1, 1_450.0, 30.0).unwrap()),
++                false
++            ),
++            None
++        );
++    }
++
++    #[test]
++    fn shortcuts_are_opt_in_and_open_only_on_completed_taps() {
++        let layout = all() | StockCapabilities::EXTENDED_CONTROLS;
++        let default_bar = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, layout).unwrap();
++        assert_eq!(
++            default_bar.action_for_gesture(tap(2_000.0, 30.0), false),
++            None
++        );
++
++        let extended = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            layout | StockCapabilities::SHORTCUT_ONE | StockCapabilities::SHORTCUT_TWO,
++        )
++        .unwrap();
++        for bar in [
++            extended,
++            extended.with_open_slider(Some(SliderControl::KeyboardBacklight)),
++            extended.with_open_slider(Some(SliderControl::Volume)),
++            extended.with_tools(true),
++        ] {
++            for fn_held in [false, true] {
++                assert_eq!(
++                    bar.action_for_gesture(tap(2_000.0, 30.0), fn_held),
++                    Some(StockAction::OpenShortcutOne)
++                );
++                assert_eq!(
++                    bar.action_for_gesture(tap(2_133.0, 30.0), fn_held),
++                    Some(StockAction::OpenShortcutTwo)
++                );
++                assert_eq!(bar.action_for_gesture(tap(2_040.0, 30.0), fn_held), None);
++                let contact = DisplayContact::new(1, 2_000.0, 30.0).unwrap();
++                assert_eq!(bar.action_at(contact, fn_held), None);
++                assert_eq!(
++                    bar.action_for_gesture(Gesture::Press(contact), fn_held),
++                    None
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn lesson_label_shows_the_phase_and_a_zero_padded_countdown() {
++        for (phase, remaining_seconds, expected_phase, expected_countdown) in [
++            (LessonPhase::Class(3), Some(872), "CLASS 3", Some("14:32")),
++            (LessonPhase::Break(1), Some(492), "BREAK", Some("08:12")),
++            (LessonPhase::BeforeSchool, Some(130), "START", Some("02:10")),
++            (LessonPhase::AfterSchool, None, "DONE", None),
++            (LessonPhase::Free, None, "FREE", None),
++        ] {
++            let (phase_label, countdown) = LessonStatus {
++                phase,
++                remaining_seconds,
++            }
++            .label_parts();
++            assert_eq!(phase_label, expected_phase);
++            assert_eq!(countdown.as_deref(), expected_countdown);
++        }
++    }
++
++    #[test]
++    fn captured_slider_clamps_motion_and_requires_its_capability() {
++        let extended = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            StockCapabilities::EXTENDED_CONTROLS | StockCapabilities::AUDIO,
++        )
++        .unwrap();
++        let volume = extended.with_open_slider(Some(SliderControl::Volume));
++        assert_eq!(volume.slider_level(SliderControl::Volume, -30.0), Some(0));
++        assert_eq!(
++            volume.slider_level(SliderControl::Volume, 2_300.0),
++            Some(100)
++        );
++        assert_eq!(volume.slider_level(SliderControl::Volume, f64::NAN), None);
++        assert_eq!(
++            volume.slider_level(SliderControl::KeyboardBacklight, 800.0),
++            None
++        );
++        assert_eq!(
++            extended
++                .with_open_slider(Some(SliderControl::KeyboardBacklight))
++                .open_slider(),
++            None
++        );
++    }
++
+     #[test]
+     fn media_capability_loss_keeps_fixed_chrome_but_disables_actions() {
+         let full = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, all()).unwrap();

@@ -1,0 +1,158 @@
+appletbdrm: port T1 resume and DRM PRIME import to Debian Linux 6.12
+
+The T1 panel unpark changes are from Nicolas Nistal, upstream PR #49
+(26f6ef618811296e4e19ca210ef08ff4b4283f00).
+The 6.12 adaptation retains the USB DMA-device reference via DRM-managed cleanup.
+
+--- a/kernel/appletbdrm-t1/appletbdrm.c
++++ b/kernel/appletbdrm-t1/appletbdrm.c
+@@ -31,8 +31,10 @@
+ #include <drm/drm_gem_atomic_helper.h>
+ #include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_gem_shmem_helper.h>
++#include <drm/drm_managed.h>
+ #include <drm/drm_modeset_helper.h>
+ #include <drm/drm_plane.h>
++#include <drm/drm_prime.h>
+ #include <drm/drm_print.h>
+ #include <drm/drm_probe_helper.h>
+ 
+@@ -56,6 +58,9 @@
+ 	unsigned int width;
+ 	unsigned int height;
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
++	struct device *dma_dev;
++#endif
+ 	struct drm_device drm;
+ 	struct drm_display_mode mode;
+ 	struct drm_connector connector;
+@@ -408,8 +413,29 @@
+ 
+ DEFINE_DRM_GEM_FOPS(appletbdrm_drm_fops);
+ 
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
++static void appletbdrm_put_dma_device(struct drm_device *drm, void *data)
++{
++	put_device(data);
++}
++
++static struct drm_gem_object *appletbdrm_gem_prime_import(struct drm_device *drm,
++							struct dma_buf *dma_buf)
++{
++	struct device *dma_dev = drm_to_adev(drm)->dma_dev;
++
++	if (!dma_dev)
++		return ERR_PTR(-ENODEV);
++
++	return drm_gem_prime_import_dev(drm, dma_buf, dma_dev);
++}
++#endif
++
+ static const struct drm_driver appletbdrm_drm_driver = {
+ 	DRM_GEM_SHMEM_DRIVER_OPS,
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
++	.gem_prime_import	= appletbdrm_gem_prime_import,
++#endif
+ 	.name			= "appletbdrm",
+ 	.desc			= "Apple Touch Bar DRM Driver",
+ 	.major			= 1,
+@@ -522,6 +548,27 @@
+ 	return 0;
+ }
+ 
++static int appletbdrm_setup_dma_device(struct usb_interface *intf,
++				      struct drm_device *drm)
++{
++	struct device *dma_dev = usb_intf_get_dma_device(intf);
++
++	if (!dma_dev) {
++		drm_warn(drm, "buffer sharing not supported");
++		return 0;
++	}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 16, 0)
++	/* PRIME import needs the USB host controller's DMA device. */
++	drm_to_adev(drm)->dma_dev = dma_dev;
++	return drmm_add_action_or_reset(drm, appletbdrm_put_dma_device, dma_dev);
++#else
++	drm_dev_set_dma_dev(drm, dma_dev);
++	put_device(dma_dev);
++	return 0;
++#endif
++}
++
+ static int appletbdrm_probe(struct usb_interface *intf,
+ 			    const struct usb_device_id *id)
+ {
+@@ -529,7 +576,6 @@
+ 	struct device *dev = &intf->dev;
+ 	struct appletbdrm_device *adev;
+ 	struct drm_device *drm = NULL;
+-	struct device *dma_dev;
+ 	int ret;
+ 
+ 	ret = usb_find_common_endpoints(intf->cur_altsetting, &bulk_in, &bulk_out, NULL, NULL);
+@@ -549,13 +595,9 @@
+ 
+ 	usb_set_intfdata(intf, adev);
+ 
+-	dma_dev = usb_intf_get_dma_device(intf);
+-	if (dma_dev) {
+-		drm_dev_set_dma_dev(drm, dma_dev);
+-		put_device(dma_dev);
+-	} else {
+-		drm_warn(drm, "buffer sharing not supported"); /* not an error */
+-	}
++	ret = appletbdrm_setup_dma_device(intf, drm);
++	if (ret)
++		return ret;
+ 
+ 	if (appletbdrm_is_t1(adev)) {
+ 		usb_clear_halt(adev_to_udev(adev),
+@@ -641,6 +683,30 @@
+ 	appletbdrm_clear_display(adev);
+ }
+ 
++/*
++ * Undo appletbdrm_t1_park() after system sleep. The T1 keeps the panel parked
++ * (report 3 mode 1) across resume, and the rearm handshake alone does not
++ * change that, so the panel stays dark until the mode is set back to 2.
++ */
++static int appletbdrm_t1_unpark(struct appletbdrm_device *adev)
++{
++	static const u8 report[15] = { 0x03, 0x02 };
++	struct usb_device *udev = adev_to_udev(adev);
++	u8 *buffer;
++	int ret;
++
++	buffer = kmemdup(report, sizeof(report), GFP_KERNEL);
++	if (!buffer)
++		return -ENOMEM;
++
++	ret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0), 0x09, 0x21,
++			      0x0303, APPLETBDRM_T1_HID_INTERFACE, buffer,
++			      sizeof(report), USB_CTRL_SET_TIMEOUT);
++	kfree(buffer);
++
++	return ret < 0 ? ret : 0;
++}
++
+ static int appletbdrm_suspend(struct usb_interface *intf, pm_message_t message)
+ {
+ 	struct appletbdrm_device *adev = usb_get_intfdata(intf);
+--- a/kernel/appletbdrm-t1/appletbdrm_resume.h
++++ b/kernel/appletbdrm-t1/appletbdrm_resume.h
+@@ -27,8 +27,11 @@
+ 	ret = appletbdrm_clear_display(adev);
+ 	if (ret)
+ 		return ret;
++	ret = appletbdrm_clear_display(adev);
++	if (ret)
++		return ret;
+ 
+-	return appletbdrm_clear_display(adev);
++	return appletbdrm_t1_unpark(adev);
+ }
+ 
+ static int appletbdrm_resume(struct usb_interface *intf)

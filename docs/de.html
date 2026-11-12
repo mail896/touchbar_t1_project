@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Ein KDE-Plasma-Renderer für die Touch Bar von T1-MacBooks unter Debian.">
+  <title>Touch Bar T1 für Debian und KDE</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="en" href="./">
+</head>
+<body>
+<header>
+  <a class="brand" href="de.html"><span>T1</span> Touch Bar</a>
+  <nav aria-label="Projektnavigation">
+    <a href="#einrichtung">Einrichtung</a>
+    <a href="./" lang="en" hreflang="en">English</a>
+  </nav>
+</header>
+<main>
+  <div class="hero">
+    <h1>Touch Bar unter Debian</h1>
+    <p>Eine eigene Touch Bar für KDE Plasma auf T1-MacBooks. Getestet auf dem MacBookPro14,2 mit Debian 13, Plasma 6.3.6 und Linux 6.12.116.</p>
+    <div class="buttons">
+      <a class="button primary" href="#einrichtung">Touch Bar einrichten</a>
+      <a class="button" href="https://github.com/mail896/touchbar_t1_project">Quellcode auf GitHub</a>
+    </div>
+  </div>
+  <figure>
+    <div class="touchbar"><a href="assets/touchbar.png"><img src="assets/touchbar.png" alt="Eigene Touch Bar mit Escape, Bildschirmhelligkeit, Tastaturbeleuchtung, Ton und Werkzeugen"></a></div>
+    <figcaption class="caption">Die Hauptleiste, mit Beispielwerten aus dem Renderer.</figcaption>
+  </figure>
+  <details class="bar-states">
+    <summary>Weitere Ansichten der Touch Bar</summary>
+    <figure>
+      <div class="touchbar"><a href="assets/touchbar-volume.png"><img src="assets/touchbar-volume.png" alt="Touch-Bar-Schieberegler für die Lautstärke mit Stummschalttaste"></a></div>
+      <figcaption class="caption">Lautstärkeregler</figcaption>
+    </figure>
+    <figure>
+      <div class="touchbar"><a href="assets/touchbar-tools.png"><img src="assets/touchbar-tools.png" alt="Medientasten, Mikrofon-Stummschaltung und CPU-Status auf der Touch Bar"></a></div>
+      <figcaption class="caption">Medientasten und Systemstatus</figcaption>
+    </figure>
+  </details>
+  <section aria-labelledby="bedienung">
+    <h2 id="bedienung">Funktionen im Überblick</h2>
+    <div class="grid">
+      <article class="card"><h3>Helligkeit und Ton</h3><p>Bildschirm, Tastaturbeleuchtung und Lautstärke über Schieberegler mit KDE-Anzeige einstellen.</p></article>
+      <article class="card"><h3>Medien und Kurzbefehle</h3><p>Wiedergabe steuern, das Mikrofon stummschalten, ein Terminal öffnen oder zur Fn-Leiste wechseln.</p></article>
+      <article class="card"><h3>Systemstatus</h3><p>CPU-Temperatur und Auslastung anzeigen. Eigene Webverknüpfungen und einen lokalen Statusbefehl ergänzen.</p></article>
+    </div>
+  </section>
+  <section aria-labelledby="bilder">
+    <h2 id="bilder">System und Startmenü</h2>
+    <div class="gallery">
+      <figure>
+        <a href="assets/debian-kde.png"><img src="assets/debian-kde.png" loading="lazy" width="1030" height="676" alt="KDE-Systeminfo mit Debian 13, Plasma 6.3.6 und Linux 6.12.116"></a>
+        <figcaption>KDE-Systeminfo auf dem getesteten MacBook.</figcaption>
+      </figure>
+      <figure>
+        <a href="assets/bootloader.png"><img src="assets/bootloader.png" loading="lazy" width="1280" height="800" alt="Grafisches rEFInd-Menü mit Einträgen für Debian und macOS"></a>
+        <figcaption>rEFInd in einer virtuellen Maschine mit einem Beispiel-Startmenü.</figcaption>
+      </figure>
+    </div>
+  </section>
+  <section class="setup" id="einrichtung">
+    <h2>Touch Bar einrichten</h2>
+    <p>Voraussetzung ist ein funktionierendes T1Bridge. Die Anleitung beschreibt die Kernel-Anpassungen für Debian 13, den Bau des Renderers und den KDE-Benutzerdienst.</p>
+    <a class="button primary" href="https://github.com/mail896/touchbar_t1_project/blob/main/guides/setup.de.md">Zur Einrichtungsanleitung</a>
+  </section>
+</main>
+<footer>
+  <a href="https://github.com/mail896/touchbar_t1_project">GitHub-Repository</a>
+  <a href="https://github.com/standardagents/t1bridge">T1Bridge-Upstream</a>
+  <a href="https://github.com/mail896/touchbar_t1_project/blob/main/THIRD_PARTY_NOTICES.md">Lizenzen und Quellen</a>
+</footer>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A KDE Plasma Touch Bar renderer for T1 MacBooks running Debian.">
+  <title>Touch Bar T1 for Debian and KDE</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="de" href="de.html">
+</head>
+<body>
+<header>
+  <a class="brand" href="./"><span>T1</span> Touch Bar</a>
+  <nav aria-label="Project navigation">
+    <a href="#setup">Setup</a>
+    <a href="de.html" lang="de" hreflang="de">Deutsch</a>
+  </nav>
+</header>
+<main>
+  <div class="hero">
+    <h1>Touch Bar on Debian</h1>
+    <p>A custom Touch Bar for KDE Plasma on T1 MacBooks. Tested on MacBookPro14,2 with Debian 13, Plasma 6.3.6 and Linux 6.12.116.</p>
+    <div class="buttons">
+      <a class="button primary" href="#setup">Set up the Touch Bar</a>
+      <a class="button" href="https://github.com/mail896/touchbar_t1_project">View source on GitHub</a>
+    </div>
+  </div>
+  <figure>
+    <div class="touchbar"><a href="assets/touchbar.png"><img src="assets/touchbar.png" alt="Custom Touch Bar renderer with Escape, display brightness, keyboard lighting, sound and tools"></a></div>
+    <figcaption class="caption">The main bar, rendered with sample values.</figcaption>
+  </figure>
+  <details class="bar-states">
+    <summary>More Touch Bar views</summary>
+    <figure>
+      <div class="touchbar"><a href="assets/touchbar-volume.png"><img src="assets/touchbar-volume.png" alt="Touch Bar volume slider and mute button"></a></div>
+      <figcaption class="caption">Volume slider</figcaption>
+    </figure>
+    <figure>
+      <div class="touchbar"><a href="assets/touchbar-tools.png"><img src="assets/touchbar-tools.png" alt="Touch Bar media controls, microphone mute and CPU status"></a></div>
+      <figcaption class="caption">Media controls and system status</figcaption>
+    </figure>
+  </details>
+  <section aria-labelledby="controls">
+    <h2 id="controls">Controls at a glance</h2>
+    <div class="grid">
+      <article class="card"><h3>Brightness and sound</h3><p>Adjust the display, keyboard lighting and volume with touch sliders and KDE feedback.</p></article>
+      <article class="card"><h3>Media and shortcuts</h3><p>Control playback, mute the microphone, open a terminal or switch to the Fn layer.</p></article>
+      <article class="card"><h3>System status</h3><p>Check CPU temperature and load. Add your own web shortcuts and a local status command.</p></article>
+    </div>
+  </section>
+  <section aria-labelledby="screens">
+    <h2 id="screens">System and boot menu</h2>
+    <div class="gallery">
+      <figure>
+        <a href="assets/debian-kde.png"><img src="assets/debian-kde.png" loading="lazy" width="1030" height="676" alt="KDE About this System window showing Debian 13, Plasma 6.3.6 and Linux 6.12.116"></a>
+        <figcaption>KDE System Information on the tested MacBook.</figcaption>
+      </figure>
+      <figure>
+        <a href="assets/bootloader.png"><img src="assets/bootloader.png" loading="lazy" width="1280" height="800" alt="Graphical rEFInd menu with Debian and macOS entries"></a>
+        <figcaption>rEFInd running in a virtual machine with an example boot menu.</figcaption>
+      </figure>
+    </div>
+  </section>
+  <section class="setup" id="setup">
+    <h2>Set up the Touch Bar</h2>
+    <p>Start with a working T1Bridge installation. The guide documents the Debian 13 kernel compatibility work, the renderer build and the KDE user service.</p>
+    <a class="button primary" href="https://github.com/mail896/touchbar_t1_project/blob/main/guides/setup.en.md">Read the setup guide</a>
+  </section>
+</main>
+<footer>
+  <a href="https://github.com/mail896/touchbar_t1_project">GitHub repository</a>
+  <a href="https://github.com/standardagents/t1bridge">Upstream T1Bridge</a>
+  <a href="https://github.com/mail896/touchbar_t1_project/blob/main/THIRD_PARTY_NOTICES.md">Licenses and credits</a>
+</footer>
+</body>
+</html>

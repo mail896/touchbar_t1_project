@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -eu
+case "${1:-}" in
+    prereqs) exit 0 ;;
+esac
+
+[ "${version:-}" = 6.12.116+deb13-amd64 ] || exit 0
+. /usr/share/initramfs-tools/hook-functions
+manual_add_modules t1_cfgsel
