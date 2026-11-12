@@ -1,0 +1,44 @@
+#!/usr/bin/python3 -B
+"""Provide the installed UZeit application's current status to the Touch Bar."""
+
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+
+APP = Path("/usr/share/unterrichtszeit")
+
+
+def status_line(now, app=APP):
+    calendar = app / "assets/calendar.json"
+    if not (app / "school.py").is_file() or not calendar.is_file():
+        raise FileNotFoundError
+
+    sys.path.insert(0, str(app))
+    from school import SchoolClock
+
+    state = SchoolClock(calendar).evaluate(now)
+    slot = state["slot"]
+    remaining = state["remaining"]
+    if remaining is not None and (
+        not isinstance(remaining, int) or remaining < 0
+    ):
+        raise ValueError
+    if slot is not None:
+        number = int(slot.name.partition(".")[0])
+        if not 1 <= number <= 20 or remaining is None:
+            raise ValueError
+        phase = "break" if slot.pause else "class"
+        return f"{phase} {number} {remaining}"
+    if remaining is not None:
+        return f"before 0 {remaining}"
+    return "after 0 -" if state["status"] == "Feierabend" else "free 0 -"
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] != ["v1", "lesson-status"]:
+        sys.exit("Usage: t1bridge-uzeit-status v1 lesson-status")
+    try:
+        print(status_line(datetime.now(timezone.utc)))
+    except (AttributeError, ImportError, KeyError, OSError, TypeError, ValueError):
+        sys.exit("UZeit status is unavailable.")

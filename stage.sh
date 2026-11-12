@@ -14,6 +14,14 @@ if [ -e "$2" ] || [ -L "$2" ]; then
     exit 2
 fi
 output=$(realpath -m -- "$2")
+image_tool=magick
+if ! command -v "$image_tool" >/dev/null 2>&1; then
+    image_tool=convert
+fi
+if ! command -v "$image_tool" >/dev/null 2>&1; then
+    echo 'ImageMagick is required to prepare the shortcut artwork.' >&2
+    exit 2
+fi
 
 work=$(mktemp -d)
 staged=
@@ -33,6 +41,13 @@ tar -xf "$work/base.tar" -C "$work/source"
     cd "$work/source"
     git apply --check "$project/renderer.patch"
     git apply "$project/renderer.patch"
+    mkdir -p crates/t1-touchbar/assets
+    "$image_tool" "$project/docs/assets/bbs-einbeck.png" -colorspace sRGB \
+        -resize 108x50 -background none -gravity center -extent 108x50 \
+        -alpha on -depth 8 RGBA:crates/t1-touchbar/assets/shortcut-1.rgba
+    "$image_tool" "$project/docs/assets/laberpapa.png" -colorspace sRGB -trim +repage \
+        -resize 108x50 -background none -gravity center -extent 108x50 \
+        -alpha on -depth 8 RGBA:crates/t1-touchbar/assets/shortcut-2.rgba
     cargo build --locked --release --target-dir "$work/target" -p t1-touchbar --bin t1-touchbar-kde
 )
 

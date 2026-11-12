@@ -123,8 +123,8 @@ The stock renderer should show the controls before adding a custom renderer.
 
 ## Optional KDE renderer
 
-Build from the project root with Rust/Cargo 1.88 or later and the same pinned
-T1Bridge checkout. The KDE provider uses KDE Plasma 6, PipeWire/WirePlumber
+Build from the project root with Rust/Cargo 1.88 or later, ImageMagick and the
+same pinned T1Bridge checkout. The KDE provider uses KDE Plasma 6, PipeWire/WirePlumber
 and the desktop's D-Bus session. Install `playerctl` for media controls and
 `pulseaudio-utils` for the optional sound feedback. KDE provides
 `qdbus6` and `kreadconfig6`.
@@ -175,9 +175,24 @@ with 420 seconds left, `break 2 120`, `before 0 60`, `after 0 -` or
 `free 0 -`. Set the absolute desktop-file path if tapping the status should
 launch an application. Restart the user service after editing the drop-in.
 
+To use the two logos shown on the project site, set these variables in place
+of the example shortcuts.
+
+```ini
+[Service]
+Environment=T1BRIDGE_BRANDED_SHORTCUTS=1
+Environment=T1BRIDGE_SHORTCUT_1=https://bbs-einbeck.de
+Environment=T1BRIDGE_SHORTCUT_2=https://github.com/mail896/
+```
+
+The optional [UZeit adapter](uzeit.en.md) and [2FA helper](2fa.en.md) have
+their own setup instructions.
+
 Generate a screenshot of the renderer with sample values on a machine without
 a Touch Bar using `t1-touchbar-kde --preview main touchbar.ppm`. Available
-views are `main`, `tools`, `keyboard`, `volume` and `function`.
+views include `main`, `tools`, `keyboard`, `volume` and `function`.
+Use `branded`, `branded-tools` or `branded-code` to see the logos,
+the example lesson status and the 2FA placeholder.
 
 [debian-linux]: https://snapshot.debian.org/package/linux/6.12.116-1/
 [deb-port]: https://github.com/vfontanela/macbookpro14-linux-support/releases/tag/v2.0.1

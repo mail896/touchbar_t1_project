@@ -12,6 +12,7 @@
 <header>
   <a class="brand" href="./"><span>T1</span> Touch Bar</a>
   <nav aria-label="Project navigation">
+    <a href="#integrations">Integrations</a>
     <a href="#setup">Setup</a>
     <a href="de.html" lang="de" hreflang="de">Deutsch</a>
   </nav>
@@ -26,9 +27,41 @@
     </div>
   </div>
   <figure>
-    <div class="touchbar"><a href="assets/touchbar.png"><img src="assets/touchbar.png" alt="Custom Touch Bar renderer with Escape, display brightness, keyboard lighting, sound and tools"></a></div>
-    <figcaption class="caption">The main bar, rendered with sample values.</figcaption>
+    <div class="touchbar"><a href="assets/touchbar-branded.png"><img src="assets/touchbar-branded.png" width="2170" height="60" alt="Touch Bar with a brightness slider, 2FA button, terminal, and the BBS Einbeck and LaberPapa logos"></a></div>
+    <figcaption class="caption">The main bar with shortcuts to BBS Einbeck and LaberPapa.</figcaption>
   </figure>
+  <section aria-labelledby="integrations">
+    <h2 id="integrations">Logos, UZeit and 2FA</h2>
+    <div class="integration-views">
+      <figure>
+        <div class="touchbar"><a href="assets/touchbar-branded-tools.png"><img src="assets/touchbar-branded-tools.png" width="2170" height="60" alt="Tools view with media controls, UZeit and CPU status"></a></div>
+        <figcaption class="caption">UZeit shows the current lesson and time remaining. This example shows seven minutes left in lesson 2.</figcaption>
+      </figure>
+      <figure>
+        <div class="touchbar"><a href="assets/touchbar-branded-code.png"><img src="assets/touchbar-branded-code.png" width="2170" height="60" alt="2FA display with dashes standing in for a one-time code"></a></div>
+        <figcaption class="caption">The 2FA button briefly shows and copies a one-time code. The preview uses dashes in its place.</figcaption>
+      </figure>
+    </div>
+    <div class="grid integration-grid">
+      <article class="card">
+        <h3>Logo shortcuts</h3>
+        <div class="logo-links">
+          <a href="https://bbs-einbeck.de"><img src="assets/bbs-einbeck.png" alt="">BBS Einbeck</a>
+          <a href="https://github.com/mail896/"><img src="assets/laberpapa.png" alt="">LaberPapa</a>
+        </div>
+      </article>
+      <article class="card">
+        <h3>UZeit</h3>
+        <p>Tap the lesson status to open UZeit.</p>
+        <div class="related-links"><a href="https://apps.bbs-einbeck.de/uzeit/">Web app</a><a href="https://github.com/mail896/bbs_unterrichtszeit_public">Source</a><a href="https://github.com/mail896/touchbar_t1_project/blob/main/guides/uzeit.en.md">Setup</a></div>
+      </article>
+      <article class="card">
+        <h3>Local 2FA helper</h3>
+        <p>The helper generates a code from an entry in the local keyring.</p>
+        <div class="related-links"><a href="https://github.com/mail896/touchbar_t1_project/blob/main/guides/2fa.en.md">Setup</a><a href="https://github.com/mail896/touchbar_t1_project/blob/main/libexec/t1bridge-totp">Source</a></div>
+      </article>
+    </div>
+  </section>
   <details class="bar-states">
     <summary>More Touch Bar views</summary>
     <figure>

@@ -89,10 +89,10 @@ index 32669af..9f10836 100644
  [lints]
 diff --git a/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
 new file mode 100644
-index 0000000..0c1a601
+index 0000000..bfccecc
 --- /dev/null
 +++ b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,115 @@
 +use std::env;
 +use std::fs::File;
 +use std::io::{BufWriter, Write};
@@ -103,7 +103,9 @@ index 0000000..0c1a601
 +use t1_touchbar::builtin_renderer;
 +use t1_touchbar::desktop_provider::{PROVIDER_ENVIRONMENT, resolve_provider_path};
 +use t1_touchbar::framebuffer::Xrgb8888Frame;
-+use t1_touchbar::stock_slice::{SliderControl, StockBar, StockCapabilities, StockLevels};
++use t1_touchbar::stock_slice::{
++    LessonPhase, LessonStatus, SliderControl, StockBar, StockCapabilities, StockLevels,
++};
 +
 +fn main() -> ExitCode {
 +    let arguments: Vec<_> = env::args_os().skip(1).collect();
@@ -128,15 +130,15 @@ index 0000000..0c1a601
 +            ExitCode::SUCCESS
 +        }
 +        [option, mode, destination] if option == "--preview" => {
-+            let (fn_held, tools, slider) = match mode.to_str() {
-+                Some("main") => (false, false, None),
-+                Some("tools") => (false, true, None),
-+                Some("keyboard") => (false, false, Some(SliderControl::KeyboardBacklight)),
-+                Some("volume") => (false, false, Some(SliderControl::Volume)),
-+                Some("function") => (true, false, None),
++            let Some(mode) = mode.to_str() else {
++                return usage();
++            };
++            let mode = match mode {
++                "main" | "tools" | "keyboard" | "volume" | "function" | "branded"
++                | "branded-tools" | "branded-code" => mode,
 +                _ => return usage(),
 +            };
-+            match write_preview(Path::new(destination), fn_held, tools, slider) {
++            match write_preview(Path::new(destination), mode) {
 +                Ok(()) => ExitCode::SUCCESS,
 +                Err(error) => {
 +                    eprintln!("t1-touchbar-kde: preview: {error}");
@@ -148,21 +150,30 @@ index 0000000..0c1a601
 +    }
 +}
 +
-+fn write_preview(
-+    destination: &Path,
-+    fn_held: bool,
-+    tools: bool,
-+    slider: Option<SliderControl>,
-+) -> Result<(), Box<dyn std::error::Error>> {
++fn write_preview(destination: &Path, mode: &str) -> Result<(), Box<dyn std::error::Error>> {
 +    const WIDTH: u32 = 2_170;
 +    const HEIGHT: u32 = 60;
-+    let capabilities = StockCapabilities::EXTENDED_CONTROLS
++    let branded = mode.starts_with("branded");
++    let mut capabilities = StockCapabilities::EXTENDED_CONTROLS
 +        | StockCapabilities::DISPLAY_BRIGHTNESS
 +        | StockCapabilities::KEYBOARD_BACKLIGHT
 +        | StockCapabilities::AUDIO
 +        | StockCapabilities::MEDIA;
++    if branded {
++        capabilities = capabilities
++            | StockCapabilities::BRANDED_SHORTCUTS
++            | StockCapabilities::SHORTCUT_ONE
++            | StockCapabilities::SHORTCUT_TWO
++            | StockCapabilities::SCHEDULE
++            | StockCapabilities::TOTP;
++    }
++    let slider = match mode {
++        "keyboard" => Some(SliderControl::KeyboardBacklight),
++        "volume" => Some(SliderControl::Volume),
++        _ => None,
++    };
 +    let bar = StockBar::new(WIDTH, HEIGHT, capabilities)?
-+        .with_tools(tools)
++        .with_tools(matches!(mode, "tools" | "branded-tools"))
 +        .with_open_slider(slider);
 +    let levels = StockLevels {
 +        display_brightness: Some(64),
@@ -171,11 +182,16 @@ index 0000000..0c1a601
 +        microphone_muted: Some(false),
 +        cpu_temperature: Some(52),
 +        cpu_cores: [Some(18), Some(27)],
++        lesson: branded.then_some(LessonStatus {
++            phase: LessonPhase::Class(2),
++            remaining_seconds: Some(7 * 60),
++        }),
++        totp_code: (mode == "branded-code").then_some(*b"------"),
 +        ..StockLevels::default()
 +    };
 +    let mut pixels = vec![0; (WIDTH * HEIGHT * 4) as usize];
 +    let mut frame = Xrgb8888Frame::new(WIDTH, HEIGHT, WIDTH * 4, &mut pixels)?;
-+    bar.render(&mut frame, fn_held, levels)?;
++    bar.render(&mut frame, mode == "function", levels)?;
 +
 +    let mut output = BufWriter::new(File::create_new(destination)?);
 +    write!(output, "P6\n{WIDTH} {HEIGHT}\n255\n")?;
@@ -188,15 +204,15 @@ index 0000000..0c1a601
 +
 +fn usage() -> ExitCode {
 +    eprintln!(
-+        "usage: t1-touchbar-kde [--brightness-percent display|keyboard]\n       t1-touchbar-kde --preview main|tools|keyboard|volume|function OUTPUT.ppm"
++        "usage: t1-touchbar-kde [--brightness-percent display|keyboard]\n       t1-touchbar-kde --preview MODE OUTPUT.ppm\n       MODE: main, tools, keyboard, volume, function, branded, branded-tools, branded-code"
 +    );
 +    ExitCode::from(2)
 +}
 diff --git a/crates/t1-touchbar/src/builtin_renderer.rs b/crates/t1-touchbar/src/builtin_renderer.rs
-index 90cead9..fe4dcdd 100644
+index 90cead9..6a46aa0 100644
 --- a/crates/t1-touchbar/src/builtin_renderer.rs
 +++ b/crates/t1-touchbar/src/builtin_renderer.rs
-@@ -1,29 +1,37 @@
+@@ -1,30 +1,39 @@
 -//! Production built-in renderer for the first private Touch Bar cutover.
 +//! Production built-in renderer for the Touch Bar.
  
@@ -239,9 +255,11 @@ index 90cead9..fe4dcdd 100644
 +    FunctionKey, SliderControl, StepDirection, StockAction, StockBar, StockCapabilities,
 +    StockLevels,
  };
++use crate::totp_preview::TotpPreview;
  use crate::touch_id_overlay::TouchIdOverlay;
  
-@@ -40,6 +48,11 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
+ const BUFFER_ID: u32 = 1;
+@@ -40,6 +49,12 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
  const HOLD_REPEAT_INTERVAL: Duration = Duration::from_millis(90);
  const OVERLAY_FADE_DURATION: Duration = Duration::from_millis(150);
  const ENROLLMENT_PROGRESS_DURATION: Duration = Duration::from_millis(220);
@@ -250,10 +268,11 @@ index 90cead9..fe4dcdd 100644
 +const BRIGHTNESS_READ_INTERVAL: Duration = Duration::from_millis(500);
 +const SLIDER_PANEL_TIMEOUT: Duration = Duration::from_secs(5);
 +const CPU_METRICS_INTERVAL: Duration = Duration::from_secs(1);
++const TOTP_DISPLAY_DURATION: Duration = Duration::from_secs(5);
  
  /// Static, redaction-safe failure from one hardware-service connection.
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -71,13 +84,38 @@ impl std::error::Error for BuiltinRendererError {}
+@@ -71,13 +86,44 @@ impl std::error::Error for BuiltinRendererError {}
  
  /// Runs the built-in renderer and reconnects forever with capped backoff.
  pub fn run_forever(provider_path: Option<&Path>) {
@@ -272,6 +291,12 @@ index 90cead9..fe4dcdd 100644
 +    }
 +    if status_launcher().is_some() || status_command_configured() {
 +        layout = layout | StockCapabilities::SCHEDULE;
++    }
++    if env::var_os("T1BRIDGE_BRANDED_SHORTCUTS").is_some_and(|value| value == "1") {
++        layout = layout | StockCapabilities::BRANDED_SHORTCUTS;
++    }
++    if totp_helper().is_some() {
++        layout = layout | StockCapabilities::TOTP;
 +    }
 +    run_with_layout(provider_path, layout);
 +}
@@ -294,7 +319,7 @@ index 90cead9..fe4dcdd 100644
          ) {
              eprintln!("t1-touchbar: {error}; reconnecting");
          }
-@@ -90,7 +128,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
+@@ -90,7 +136,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
      delay.saturating_mul(2).min(MAX_RECONNECT_DELAY)
  }
  
@@ -306,7 +331,7 @@ index 90cead9..fe4dcdd 100644
      let NegotiatedConnection {
          mut connection,
          request_ids,
-@@ -102,7 +143,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+@@ -102,7 +151,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
      let mut session = RendererSession::new(
          dimensions,
          request_ids,
@@ -315,7 +340,7 @@ index 90cead9..fe4dcdd 100644
      )?;
      session.register(&connection)?;
      let overlay_watcher = OverlayWatcher::start();
-@@ -114,6 +155,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+@@ -114,6 +163,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
              session.set_desktop_state(state)?;
              session.submit_if_ready(&connection)?;
          }
@@ -333,7 +358,7 @@ index 90cead9..fe4dcdd 100644
          if let Some(observation) = overlay_watcher.take_latest() {
              let overlay = observation.overlay();
              session.set_overlay(
-@@ -321,6 +373,7 @@ enum PendingRequest {
+@@ -321,6 +381,7 @@ enum PendingRequest {
      TapKeys,
      CancelTouchId,
      HardwareAction(Option<DesktopAction>),
@@ -341,7 +366,7 @@ index 90cead9..fe4dcdd 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -339,6 +392,12 @@ struct RendererSession {
+@@ -339,6 +400,14 @@ struct RendererSession {
      pending_desktop_state: Option<DesktopState>,
      display_off: bool,
      levels: StockLevels,
@@ -349,12 +374,14 @@ index 90cead9..fe4dcdd 100644
 +    sliders: [SliderState; 3],
 +    slider_panel_deadline: Option<Duration>,
 +    desktop_launcher: Option<Child>,
++    totp_preview: Option<TotpPreview>,
++    totp_display_deadline: Option<Duration>,
 +    next_cpu_metrics_read: Duration,
 +    core_usage: Option<CoreUsage>,
      touch_id: TouchIdOverlay,
      overlay_state: Option<OverlayState>,
      overlay_visual_state: Option<OverlayState>,
-@@ -390,6 +449,12 @@ impl RendererSession {
+@@ -390,6 +459,14 @@ impl RendererSession {
              pending_desktop_state: None,
              display_off: false,
              levels: StockLevels::default(),
@@ -362,12 +389,14 @@ index 90cead9..fe4dcdd 100644
 +            sliders: [SliderState::default(); 3],
 +            slider_panel_deadline: None,
 +            desktop_launcher: None,
++            totp_preview: None,
++            totp_display_deadline: None,
 +            next_cpu_metrics_read: Duration::ZERO,
 +            core_usage: None,
              touch_id,
              overlay_state: None,
              overlay_visual_state: None,
-@@ -463,6 +528,13 @@ impl RendererSession {
+@@ -463,6 +540,13 @@ impl RendererSession {
                  if !in_flight.acknowledged || release.frame_id != in_flight.frame_id {
                      return Err(BuiltinRendererError::Protocol);
                  }
@@ -381,7 +410,7 @@ index 90cead9..fe4dcdd 100644
                  self.in_flight = None;
                  self.submit_if_ready(connection)
              }
-@@ -472,6 +544,19 @@ impl RendererSession {
+@@ -472,6 +556,19 @@ impl RendererSession {
                  }
                  let outcome = self.observe_input(frame)?;
                  self.dirty |= outcome.redraw;
@@ -401,7 +430,7 @@ index 90cead9..fe4dcdd 100644
                  for action in outcome.actions {
                      self.dispatch(action, connection, provider)?;
                  }
-@@ -525,6 +610,17 @@ impl RendererSession {
+@@ -525,6 +622,17 @@ impl RendererSession {
                  ));
                  Ok(())
              }
@@ -419,7 +448,7 @@ index 90cead9..fe4dcdd 100644
              PendingRequest::TapKeys => Ok(()),
              PendingRequest::Register => Err(BuiltinRendererError::Protocol),
          }
-@@ -551,6 +647,7 @@ impl RendererSession {
+@@ -551,6 +659,7 @@ impl RendererSession {
          match pending {
              PendingRequest::TapKeys
              | PendingRequest::CancelTouchId
@@ -427,7 +456,7 @@ index 90cead9..fe4dcdd 100644
              | PendingRequest::HardwareAction(_) => {
                  eprintln!("t1-touchbar: typed action was rejected");
                  Ok(())
-@@ -572,6 +669,11 @@ impl RendererSession {
+@@ -572,6 +681,11 @@ impl RendererSession {
          &mut self,
          mut frame: WireInputFrame,
      ) -> Result<InputOutcome, BuiltinRendererError> {
@@ -439,7 +468,7 @@ index 90cead9..fe4dcdd 100644
          if self.display_off || self.input.wait_for_touch_release {
              self.input.wait_for_touch_release = frame.contacts.iter().any(|contact| contact.tip);
              frame.contacts.clear();
-@@ -635,31 +737,18 @@ impl RendererSession {
+@@ -635,31 +749,18 @@ impl RendererSession {
              return self.send_keys(&[key], connection);
          }
          match action {
@@ -482,7 +511,7 @@ index 90cead9..fe4dcdd 100644
                  self.levels.muted = !self.levels.muted;
                  self.dirty = true;
                  dispatch_desktop(provider, DesktopAction::ToggleMute);
-@@ -688,10 +777,73 @@ impl RendererSession {
+@@ -688,10 +789,84 @@ impl RendererSession {
                  dispatch_desktop(provider, DesktopAction::MediaNext);
                  Ok(())
              }
@@ -512,6 +541,17 @@ index 90cead9..fe4dcdd 100644
 +            }
 +            StockAction::ToggleMicrophoneMute => {
 +                dispatch_desktop(provider, DesktopAction::ToggleMicrophoneMute);
++                Ok(())
++            }
++            StockAction::CopyTotp => {
++                if !self.display_off
++                    && self.overlay_state.is_none()
++                    && self.totp_preview.as_ref().is_none_or(TotpPreview::copied)
++                    && let Some(helper) = totp_helper()
++                {
++                    self.clear_totp_preview();
++                    self.totp_preview = TotpPreview::start(&helper, self.now).ok();
++                }
 +                Ok(())
 +            }
              StockAction::Escape | StockAction::Function(_) => unreachable!(),
@@ -556,10 +596,21 @@ index 90cead9..fe4dcdd 100644
      fn send_hardware_action(
          &mut self,
          action: ClientMessage,
-@@ -832,6 +984,37 @@ impl RendererSession {
+@@ -789,6 +964,9 @@ impl RendererSession {
+     }
+ 
+     fn set_overlay(&mut self, state: Option<OverlayState>, progress: Option<u8>) {
++        if state.is_some() {
++            self.clear_totp_preview();
++        }
+         if self.overlay_state == state && self.enrollment_progress == progress {
+             return;
+         }
+@@ -832,6 +1010,38 @@ impl RendererSession {
          self.now = now;
          self.advance_overlay_fade(now);
          self.advance_enrollment_progress(now);
++        self.advance_totp_preview();
 +        if self
 +            .slider_panel_deadline
 +            .is_some_and(|deadline| now >= deadline)
@@ -594,10 +645,37 @@ index 90cead9..fe4dcdd 100644
          if !self.display_off
              && !self.input.wait_for_touch_release
              && let Some(action) = self.input.take_repeat(now)
-@@ -841,6 +1024,146 @@ impl RendererSession {
+@@ -841,6 +1051,173 @@ impl RendererSession {
          self.submit_if_ready(connection)
      }
  
++    fn advance_totp_preview(&mut self) {
++        if let Some(preview) = self.totp_preview.as_mut() {
++            if !preview.running(self.now) {
++                self.clear_totp_preview();
++                return;
++            }
++            if let Some(code) = preview.take_code() {
++                self.levels.totp_code = Some(code);
++                self.totp_display_deadline = Some(self.now + TOTP_DISPLAY_DURATION);
++                self.dirty = true;
++            }
++        }
++        if self
++            .totp_display_deadline
++            .is_some_and(|deadline| self.now >= deadline)
++        {
++            self.totp_display_deadline = None;
++            self.dirty |= self.levels.totp_code.take().is_some();
++        }
++    }
++
++    fn clear_totp_preview(&mut self) {
++        self.totp_preview = None;
++        self.totp_display_deadline = None;
++        self.dirty |= self.levels.totp_code.take().is_some();
++    }
++
 +    fn advance_slider(
 +        &mut self,
 +        control: SliderControl,
@@ -741,9 +819,11 @@ index 90cead9..fe4dcdd 100644
      fn advance_overlay_fade(&mut self, now: Duration) {
          if self.overlay_opacity == self.overlay_target_opacity {
              return;
-@@ -895,15 +1218,13 @@ impl RendererSession {
+@@ -894,16 +1271,15 @@ impl RendererSession {
+         if self.display_off != state.display_off {
              self.display_off = state.display_off;
              if self.display_off {
++                self.clear_totp_preview();
                  self.input.cancel_touches();
 +                self.sliders = [SliderState::default(); 3];
 +                self.slider_panel_deadline = self.stock.open_slider().map(|_| self.now);
@@ -760,7 +840,7 @@ index 90cead9..fe4dcdd 100644
              return Ok(());
          }
          if !self.input.is_idle() {
-@@ -930,17 +1251,36 @@ impl RendererSession {
+@@ -930,17 +1306,36 @@ impl RendererSession {
              self.dimensions.height(),
              capabilities,
          )
@@ -800,7 +880,7 @@ index 90cead9..fe4dcdd 100644
      fn allocate_request(&mut self, kind: PendingRequest) -> Result<u32, BuiltinRendererError> {
          if self.pending.len() >= MAX_PENDING_REQUESTS {
              return Err(BuiltinRendererError::Protocol);
-@@ -960,6 +1300,134 @@ impl RendererSession {
+@@ -960,6 +1355,138 @@ impl RendererSession {
      }
  }
  
@@ -899,6 +979,10 @@ index 90cead9..fe4dcdd 100644
 +    resolve_provider_path(env::var_os("T1BRIDGE_STATUS_COMMAND").as_deref()).is_some()
 +}
 +
++fn totp_helper() -> Option<PathBuf> {
++    resolve_provider_path(env::var_os("T1BRIDGE_TOTP_HELPER").as_deref())
++}
++
 +fn launch_status(path: &Path) -> Option<Child> {
 +    Command::new("/usr/bin/gio")
 +        .arg("launch")
@@ -935,7 +1019,7 @@ index 90cead9..fe4dcdd 100644
  const fn wire_step(direction: StepDirection) -> WireStepDirection {
      match direction {
          StepDirection::Down => WireStepDirection::Down,
-@@ -1007,6 +1475,8 @@ struct InputOutcome {
+@@ -1007,6 +1534,8 @@ struct InputOutcome {
      redraw: bool,
      actions: Vec<StockAction>,
      cancel_touch_id: bool,
@@ -944,7 +1028,7 @@ index 90cead9..fe4dcdd 100644
  }
  
  struct InputInterpreter {
-@@ -1018,6 +1488,7 @@ struct InputInterpreter {
+@@ -1018,6 +1547,7 @@ struct InputInterpreter {
      pressed: Option<StockAction>,
      repeat: Option<RepeatState>,
      suppress_tap: Option<StockAction>,
@@ -952,7 +1036,7 @@ index 90cead9..fe4dcdd 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -1042,6 +1513,7 @@ impl InputInterpreter {
+@@ -1042,6 +1572,7 @@ impl InputInterpreter {
              pressed: None,
              repeat: None,
              suppress_tap: None,
@@ -960,7 +1044,7 @@ index 90cead9..fe4dcdd 100644
          })
      }
  
-@@ -1053,6 +1525,10 @@ impl InputInterpreter {
+@@ -1053,6 +1584,10 @@ impl InputInterpreter {
          self.pressed
      }
  
@@ -971,7 +1055,7 @@ index 90cead9..fe4dcdd 100644
      fn is_idle(&self) -> bool {
          !self.wait_for_touch_release && self.gestures.is_idle()
      }
-@@ -1092,9 +1568,10 @@ impl InputInterpreter {
+@@ -1092,9 +1627,10 @@ impl InputInterpreter {
          let pressed = contacts
              .first()
              .filter(|contact| {
@@ -985,7 +1069,7 @@ index 90cead9..fe4dcdd 100644
              })
              .and_then(|contact| self.stock.action_at(*contact, self.fn_pressed));
          redraw |= self.pressed != pressed;
-@@ -1118,9 +1595,60 @@ impl InputInterpreter {
+@@ -1118,9 +1654,60 @@ impl InputInterpreter {
              .gestures
              .ingest_frame(Duration::from_nanos(frame.monotonic_ns), &contacts)
              .map_err(|_| BuiltinRendererError::Gesture)?;
@@ -1046,7 +1130,7 @@ index 90cead9..fe4dcdd 100644
              if matches!(
                  gesture,
                  crate::gesture::Gesture::DragStart(_) | crate::gesture::Gesture::Drag { .. }
-@@ -1161,11 +1689,13 @@ impl InputInterpreter {
+@@ -1161,11 +1748,13 @@ impl InputInterpreter {
                  actions.push(action);
              }
          }
@@ -1062,7 +1146,7 @@ index 90cead9..fe4dcdd 100644
      }
  
      fn take_repeat(&mut self, now: Duration) -> Option<StockAction> {
-@@ -1187,6 +1717,7 @@ impl InputInterpreter {
+@@ -1187,6 +1776,7 @@ impl InputInterpreter {
          self.wait_for_touch_release |= !self.gestures.is_idle();
          self.gestures.cancel_all();
          self.pressed = None;
@@ -1070,7 +1154,7 @@ index 90cead9..fe4dcdd 100644
          self.cancel_repeat();
      }
  }
-@@ -1230,7 +1761,16 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
+@@ -1230,7 +1820,17 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
          | StockAction::StepVolume(_)
          | StockAction::MediaPrevious
          | StockAction::MediaPlayPause
@@ -1082,13 +1166,14 @@ index 90cead9..fe4dcdd 100644
 +        | StockAction::OpenTools
 +        | StockAction::ToggleMicrophoneMute
 +        | StockAction::LaunchSchedule
++        | StockAction::CopyTotp
 +        | StockAction::OpenSystemMonitor
 +        | StockAction::OpenShortcutOne
 +        | StockAction::OpenShortcutTwo => return None,
      })
  }
  
-@@ -1842,6 +2382,8 @@ mod tests {
+@@ -1842,6 +2442,8 @@ mod tests {
                  redraw: true,
                  actions: Vec::new(),
                  cancel_touch_id: false,
@@ -1097,7 +1182,7 @@ index 90cead9..fe4dcdd 100644
              }
          );
          assert!(interpreter.fn_pressed());
-@@ -1861,6 +2403,146 @@ mod tests {
+@@ -1861,6 +2463,146 @@ mod tests {
          );
      }
  
@@ -1863,10 +1948,10 @@ index 315fce7..543abbd 100644
      fn provider_path_requires_an_absolute_executable_file() {
          let executable = std::env::current_exe().expect("current test executable");
 diff --git a/crates/t1-touchbar/src/lib.rs b/crates/t1-touchbar/src/lib.rs
-index 43722b7..18fcf28 100644
+index 43722b7..9f34871 100644
 --- a/crates/t1-touchbar/src/lib.rs
 +++ b/crates/t1-touchbar/src/lib.rs
-@@ -1,6 +1,7 @@
+@@ -1,9 +1,11 @@
  //! Unprivileged Touch Bar rendering and optional desktop integration.
  
  pub mod builtin_renderer;
@@ -1874,11 +1959,68 @@ index 43722b7..18fcf28 100644
  pub mod desktop_provider;
  pub mod framebuffer;
  pub mod gesture;
++mod logos;
+ mod overlay_labels;
+ pub mod overlay_state;
+ pub mod renderer_launcher;
+@@ -11,4 +13,5 @@ mod stock_art;
+ mod stock_icons;
+ mod stock_labels;
+ pub mod stock_slice;
++mod totp_preview;
+ pub mod touch_id_overlay;
+diff --git a/crates/t1-touchbar/src/logos.rs b/crates/t1-touchbar/src/logos.rs
+new file mode 100644
+index 0000000..7ba3ef2
+--- /dev/null
++++ b/crates/t1-touchbar/src/logos.rs
+@@ -0,0 +1,41 @@
++use crate::framebuffer::{FramebufferError, Rectangle, Rgb, Xrgb8888Frame};
++
++const WIDTH: u32 = 108;
++const HEIGHT: u32 = 50;
++const PIXELS: [&[u8; (WIDTH * HEIGHT * 4) as usize]; 2] = [
++    include_bytes!("../assets/shortcut-1.rgba"),
++    include_bytes!("../assets/shortcut-2.rgba"),
++];
++
++pub(crate) fn draw(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    index: usize,
++) -> Result<(), FramebufferError> {
++    let pixels = PIXELS[index];
++    let height = (bounds.height * 5 / 6).min(bounds.width * HEIGHT / WIDTH);
++    let width = height * WIDTH / HEIGHT;
++    let left = bounds.x + (bounds.width - width) / 2;
++    let top = bounds.y + (bounds.height - height) / 2;
++    for y in 0..height {
++        let source_y = y * HEIGHT / height;
++        for x in 0..width {
++            let source_x = x * WIDTH / width;
++            let offset = ((source_y * WIDTH + source_x) * 4) as usize;
++            let [red, green, blue, alpha] = pixels[offset..][..4].try_into().expect("RGBA pixel");
++            if alpha != 0 {
++                frame.blend_rectangle(
++                    Rectangle {
++                        x: left + x,
++                        y: top + y,
++                        width: 1,
++                        height: 1,
++                    },
++                    Rgb { red, green, blue },
++                    alpha,
++                )?;
++            }
++        }
++    }
++    Ok(())
++}
 diff --git a/crates/t1-touchbar/src/stock_art.rs b/crates/t1-touchbar/src/stock_art.rs
-index ad49165..9a1b5f7 100644
+index ad49165..e85d2a5 100644
 --- a/crates/t1-touchbar/src/stock_art.rs
 +++ b/crates/t1-touchbar/src/stock_art.rs
-@@ -7,19 +7,38 @@ use crate::stock_labels::AlphaMask;
+@@ -7,19 +7,39 @@ use crate::stock_labels::AlphaMask;
  const SAMPLE_GRID: u32 = 4;
  const SAMPLE_COUNT: u32 = SAMPLE_GRID * SAMPLE_GRID;
  const NATIVE_PLATE_HEIGHT: u32 = 60;
@@ -1914,10 +2056,11 @@ index ad49165..9a1b5f7 100644
 +    Microphone,
 +    MicrophoneMuted,
 +    Schedule,
++    TwoFactor,
  }
  
  pub(crate) fn draw_rounded_plate(
-@@ -94,18 +113,309 @@ pub(crate) fn draw_symbol(
+@@ -94,18 +114,317 @@ pub(crate) fn draw_symbol(
      let mask = match symbol {
          Symbol::DisplayDown => stock_icons::DISPLAY_DOWN,
          Symbol::DisplayUp => stock_icons::DISPLAY_UP,
@@ -1944,6 +2087,13 @@ index ad49165..9a1b5f7 100644
 +            return draw_outline_symbol(frame, bounds, color, is_microphone_muted_pixel);
 +        }
 +        Symbol::Schedule => return draw_panel_text(frame, bounds, "STATUS", color),
++        Symbol::TwoFactor => {
++            return draw_panel_text_runs(
++                frame,
++                bounds,
++                &[("2", ACCENT_YELLOW), ("F", ACCENT_BLUE), ("A", color)],
++            );
++        }
      };
      draw_label(frame, bounds, mask, color)
  }
@@ -2203,6 +2353,7 @@ index ad49165..9a1b5f7 100644
 +        'E' => [31, 16, 16, 30, 16, 16, 31],
 +        'F' => [31, 16, 16, 30, 16, 16, 16],
 +        'I' => [14, 4, 4, 4, 4, 4, 14],
++        'L' => [16, 16, 16, 16, 16, 16, 31],
 +        'N' => [17, 25, 25, 21, 19, 19, 17],
 +        'P' => [30, 17, 17, 30, 16, 16, 16],
 +        'R' => [30, 17, 17, 30, 20, 18, 17],
@@ -2228,14 +2379,15 @@ index ad49165..9a1b5f7 100644
      u32::try_from(
          (u64::from(native) * u64::from(plate_height)).div_ceil(u64::from(NATIVE_PLATE_HEIGHT)),
 diff --git a/crates/t1-touchbar/src/stock_slice.rs b/crates/t1-touchbar/src/stock_slice.rs
-index 4c0ae87..7ef15cd 100644
+index 4c0ae87..2cd98b2 100644
 --- a/crates/t1-touchbar/src/stock_slice.rs
 +++ b/crates/t1-touchbar/src/stock_slice.rs
-@@ -4,16 +4,33 @@ use std::{error::Error, fmt};
+@@ -4,16 +4,34 @@ use std::{error::Error, fmt};
  
  use crate::framebuffer::{FramebufferError, Rectangle, Rgb, Xrgb8888Frame};
  use crate::gesture::{DisplayContact, Gesture};
 -use crate::stock_art::{self, Symbol};
++use crate::logos;
 +use crate::stock_art::{self, ACCENT_BLUE, ACCENT_YELLOW, Symbol};
  use crate::stock_labels::{self, AlphaMask};
  
@@ -2267,7 +2419,7 @@ index 4c0ae87..7ef15cd 100644
  
  const BACKGROUND: Rgb = Rgb {
      red: 0,
-@@ -35,6 +52,26 @@ const LABEL: Rgb = Rgb {
+@@ -35,6 +53,31 @@ const LABEL: Rgb = Rgb {
      green: 242,
      blue: 242,
  };
@@ -2291,10 +2443,23 @@ index 4c0ae87..7ef15cd 100644
 +    green: 211,
 +    blue: 100,
 +};
++const TWO_FACTOR_RED: Rgb = Rgb {
++    red: 255,
++    green: 111,
++    blue: 120,
++};
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  pub enum FunctionKey {
-@@ -67,6 +104,10 @@ impl StockCapabilities {
+@@ -60,13 +103,19 @@ pub enum StepDirection {
+ 
+ /// Independently available default-renderer controls.
+ #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+-pub struct StockCapabilities(u8);
++pub struct StockCapabilities(u16);
+ 
+ impl StockCapabilities {
+     pub const DISPLAY_BRIGHTNESS: Self = Self(1);
      pub const KEYBOARD_BACKLIGHT: Self = Self(2);
      pub const AUDIO: Self = Self(4);
      pub const MEDIA: Self = Self(8);
@@ -2302,17 +2467,20 @@ index 4c0ae87..7ef15cd 100644
 +    pub const SHORTCUT_ONE: Self = Self(32);
 +    pub const SHORTCUT_TWO: Self = Self(64);
 +    pub const SCHEDULE: Self = Self(128);
++    pub const BRANDED_SHORTCUTS: Self = Self(256);
++    pub const TOTP: Self = Self(512);
  
      #[must_use]
      pub const fn contains(self, capability: Self) -> bool {
-@@ -82,14 +123,89 @@ impl std::ops::BitOr for StockCapabilities {
+@@ -82,14 +131,106 @@ impl std::ops::BitOr for StockCapabilities {
      }
  }
  
 -/// Renderer-known desktop levels. The fixed Boot Camp face uses mute only;
 -/// the remaining values stay available to replacement renderers and providers.
+-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 +/// Renderer-known desktop levels.
- #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++#[derive(Clone, Copy, Default, Eq, PartialEq)]
  pub struct StockLevels {
      pub display_brightness: Option<u8>,
      pub keyboard_backlight: Option<u8>,
@@ -2322,6 +2490,23 @@ index 4c0ae87..7ef15cd 100644
 +    pub cpu_temperature: Option<i16>,
 +    pub cpu_cores: [Option<u8>; 2],
 +    pub lesson: Option<LessonStatus>,
++    pub totp_code: Option<[u8; 6]>,
++}
++
++impl fmt::Debug for StockLevels {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("StockLevels")
++            .field("display_brightness", &self.display_brightness)
++            .field("keyboard_backlight", &self.keyboard_backlight)
++            .field("volume", &self.volume)
++            .field("muted", &self.muted)
++            .field("microphone_muted", &self.microphone_muted)
++            .field("cpu_temperature", &self.cpu_temperature)
++            .field("cpu_cores", &self.cpu_cores)
++            .field("lesson", &self.lesson)
++            .finish_non_exhaustive()
++    }
 +}
 +
 +#[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2397,7 +2582,7 @@ index 4c0ae87..7ef15cd 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -103,6 +219,15 @@ pub enum StockAction {
+@@ -103,6 +244,16 @@ pub enum StockAction {
      MediaPrevious,
      MediaPlayPause,
      MediaNext,
@@ -2407,13 +2592,14 @@ index 4c0ae87..7ef15cd 100644
 +    OpenTools,
 +    ToggleMicrophoneMute,
 +    LaunchSchedule,
++    CopyTotp,
 +    OpenShortcutOne,
 +    OpenShortcutTwo,
 +    OpenSystemMonitor,
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -149,6 +274,12 @@ enum Control {
+@@ -149,6 +300,13 @@ enum Control {
      Mute,
      VolumeDown,
      VolumeUp,
@@ -2423,10 +2609,11 @@ index 4c0ae87..7ef15cd 100644
 +    OpenTools,
 +    Microphone,
 +    Schedule,
++    Totp,
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -211,6 +342,72 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
+@@ -211,6 +369,100 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
      },
  ];
  
@@ -2450,6 +2637,34 @@ index 4c0ae87..7ef15cd 100644
 +        control: Control::OpenTools,
 +        x: 1_684,
 +        width: 226,
++    },
++];
++
++const COLLAPSED_TOTP_CONTROLS: [NativeControl; 5] = [
++    NativeControl {
++        control: Control::Totp,
++        x: 980,
++        width: 174,
++    },
++    NativeControl {
++        control: Control::OpenSlider(SliderControl::KeyboardBacklight),
++        x: 1_170,
++        width: 174,
++    },
++    NativeControl {
++        control: Control::OpenSlider(SliderControl::Volume),
++        x: 1_360,
++        width: 174,
++    },
++    NativeControl {
++        control: Control::Terminal,
++        x: 1_550,
++        width: 174,
++    },
++    NativeControl {
++        control: Control::OpenTools,
++        x: 1_740,
++        width: 170,
 +    },
 +];
 +
@@ -2499,7 +2714,7 @@ index 4c0ae87..7ef15cd 100644
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  struct LaidOutControl {
      control: Control,
-@@ -223,6 +420,8 @@ pub struct StockBar {
+@@ -223,6 +475,8 @@ pub struct StockBar {
      width: u32,
      height: u32,
      capabilities: StockCapabilities,
@@ -2508,7 +2723,7 @@ index 4c0ae87..7ef15cd 100644
  }
  
  impl StockBar {
-@@ -241,6 +440,8 @@ impl StockBar {
+@@ -241,6 +495,8 @@ impl StockBar {
                  width,
                  height,
                  capabilities,
@@ -2517,7 +2732,7 @@ index 4c0ae87..7ef15cd 100644
              })
          }
      }
-@@ -255,6 +456,43 @@ impl StockBar {
+@@ -255,6 +511,43 @@ impl StockBar {
          self.height
      }
  
@@ -2561,7 +2776,7 @@ index 4c0ae87..7ef15cd 100644
      #[must_use]
      pub(crate) fn escape_right(self) -> u32 {
          let bounds = self.escape_bounds();
-@@ -290,10 +528,25 @@ impl StockBar {
+@@ -290,10 +583,32 @@ impl StockBar {
          }
          frame.clear(BACKGROUND);
          if fn_held {
@@ -2570,7 +2785,7 @@ index 4c0ae87..7ef15cd 100644
          } else {
 -            self.render_normal_row(frame, levels, pressed)
 +            self.render_normal_row(frame, levels, pressed)?;
-         }
++        }
 +        for (index, (capability, _, label)) in SHORTCUTS.into_iter().enumerate() {
 +            if self.capabilities.contains(capability) {
 +                let bounds = self.shortcut_bounds(index);
@@ -2581,15 +2796,22 @@ index 4c0ae87..7ef15cd 100644
 +                        self.scaled_y(PLATE_RADIUS),
 +                        PLATE,
 +                    )?;
-+                    stock_art::draw_panel_text(frame, bounds, label, LABEL)?;
++                    if self
++                        .capabilities
++                        .contains(StockCapabilities::BRANDED_SHORTCUTS)
++                    {
++                        logos::draw(frame, bounds, index)?;
++                    } else {
++                        stock_art::draw_panel_text(frame, bounds, label, LABEL)?;
++                    }
 +                }
 +            }
-+        }
+         }
 +        Ok(())
      }
  
      /// Maps a completed tap to one currently visible action.
-@@ -302,7 +555,37 @@ impl StockBar {
+@@ -302,7 +617,37 @@ impl StockBar {
          let Gesture::Tap(contact) = gesture else {
              return None;
          };
@@ -2628,7 +2850,7 @@ index 4c0ae87..7ef15cd 100644
      }
  
      /// Maps an active display contact to the control beneath it.
-@@ -319,28 +602,210 @@ impl StockBar {
+@@ -319,28 +664,220 @@ impl StockBar {
          if contains(self.escape_bounds(), x, y) {
              return Some(StockAction::Escape);
          }
@@ -2700,6 +2922,15 @@ index 4c0ae87..7ef15cd 100644
              self.draw_plate(frame, item.bounds, action, pressed)?;
 -            let symbol = control_symbol(item.control);
 -            stock_art::draw_symbol(frame, item.bounds, symbol, LABEL)?;
++            if item.control == Control::Totp
++                && let Some(code) = levels
++                    .totp_code
++                    .as_ref()
++                    .and_then(|digits| std::str::from_utf8(digits).ok())
++            {
++                stock_art::draw_panel_text(frame, item.bounds, code, TWO_FACTOR_RED)?;
++                continue;
++            }
 +            if item.control == Control::Schedule
 +                && let Some(lesson) = levels.lesson
 +            {
@@ -2721,6 +2952,7 @@ index 4c0ae87..7ef15cd 100644
 +            }
 +            let symbol = control_symbol(item.control, self.open_slider(), levels);
 +            let color = match item.control {
++                Control::Totp => TWO_FACTOR_RED,
 +                Control::Microphone if levels.microphone_muted == Some(true) => MUTED_LABEL,
 +                Control::MediaPrevious | Control::MediaPlayPause | Control::MediaNext
 +                    if self.tools_open() && !self.control_available(item.control) =>
@@ -2843,7 +3075,7 @@ index 4c0ae87..7ef15cd 100644
          }
          Ok(())
      }
-@@ -415,20 +880,89 @@ impl StockBar {
+@@ -415,20 +952,92 @@ impl StockBar {
      }
  
      fn normal_controls(self) -> Vec<LaidOutControl> {
@@ -2858,6 +3090,9 @@ index 4c0ae87..7ef15cd 100644
 +            match self.open_slider() {
 +                Some(SliderControl::Volume) => &EXPANDED_VOLUME_CONTROLS[..],
 +                Some(_) => &EXPANDED_CONTROLS[..],
++                None if self.capabilities.contains(StockCapabilities::TOTP) => {
++                    &COLLAPSED_TOTP_CONTROLS[..]
++                }
 +                None => &COLLAPSED_CONTROLS[..],
 +            }
 +        } else {
@@ -2940,7 +3175,7 @@ index 4c0ae87..7ef15cd 100644
      const fn control_available(self, control: Control) -> bool {
          match control {
              Control::DisplayDown | Control::DisplayUp => self
-@@ -443,18 +977,40 @@ impl StockBar {
+@@ -443,18 +1052,41 @@ impl StockBar {
              Control::Mute | Control::VolumeDown | Control::VolumeUp => {
                  self.capabilities.contains(StockCapabilities::AUDIO)
              }
@@ -2953,6 +3188,7 @@ index 4c0ae87..7ef15cd 100644
 +            Control::Schedule => {
 +                self.tools_open() && self.capabilities.contains(StockCapabilities::SCHEDULE)
 +            }
++            Control::Totp => self.capabilities.contains(StockCapabilities::TOTP),
          }
      }
  
@@ -2986,7 +3222,7 @@ index 4c0ae87..7ef15cd 100644
      }
  
      fn scaled_x(self, value: u32) -> u32 {
-@@ -503,10 +1059,20 @@ const fn control_action(control: Control) -> StockAction {
+@@ -503,10 +1135,21 @@ const fn control_action(control: Control) -> StockAction {
          Control::Mute => StockAction::ToggleMute,
          Control::VolumeDown => StockAction::StepVolume(StepDirection::Down),
          Control::VolumeUp => StockAction::StepVolume(StepDirection::Up),
@@ -2996,6 +3232,7 @@ index 4c0ae87..7ef15cd 100644
 +        Control::OpenTools => StockAction::OpenTools,
 +        Control::Microphone => StockAction::ToggleMicrophoneMute,
 +        Control::Schedule => StockAction::LaunchSchedule,
++        Control::Totp => StockAction::CopyTotp,
      }
  }
  
@@ -3008,7 +3245,7 @@ index 4c0ae87..7ef15cd 100644
      match control {
          Control::DisplayDown => Symbol::DisplayDown,
          Control::DisplayUp => Symbol::DisplayUp,
-@@ -515,9 +1081,21 @@ const fn control_symbol(control: Control) -> Symbol {
+@@ -515,9 +1158,22 @@ const fn control_symbol(control: Control) -> Symbol {
          Control::MediaPrevious => Symbol::Previous,
          Control::MediaPlayPause => Symbol::PlayPause,
          Control::MediaNext => Symbol::Next,
@@ -3027,10 +3264,11 @@ index 4c0ae87..7ef15cd 100644
 +        }
 +        Control::Microphone => Symbol::Microphone,
 +        Control::Schedule => Symbol::Schedule,
++        Control::Totp => Symbol::TwoFactor,
      }
  }
  
-@@ -623,6 +1201,282 @@ mod tests {
+@@ -623,6 +1279,321 @@ mod tests {
          }
      }
  
@@ -3265,6 +3503,45 @@ index 4c0ae87..7ef15cd 100644
 +    }
 +
 +    #[test]
++    fn totp_is_available_only_on_an_enabled_main_panel() {
++        let layout = all() | StockCapabilities::EXTENDED_CONTROLS;
++        let contact = tap(1_067.0, 30.0);
++        let default_bar = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, layout).unwrap();
++        assert_ne!(
++            default_bar.action_for_gesture(contact, false),
++            Some(StockAction::CopyTotp)
++        );
++        let enabled = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            layout | StockCapabilities::TOTP,
++        )
++        .unwrap();
++        assert_eq!(
++            enabled.action_for_gesture(contact, false),
++            Some(StockAction::CopyTotp)
++        );
++        assert_ne!(
++            enabled.action_for_gesture(contact, true),
++            Some(StockAction::CopyTotp)
++        );
++        assert_ne!(
++            enabled.with_tools(true).action_for_gesture(contact, false),
++            Some(StockAction::CopyTotp)
++        );
++        assert!(
++            !format!(
++                "{:?}",
++                StockLevels {
++                    totp_code: Some([b'0'; 6]),
++                    ..StockLevels::default()
++                }
++            )
++            .contains("totp_code")
++        );
++    }
++
++    #[test]
 +    fn lesson_label_shows_the_phase_and_a_zero_padded_countdown() {
 +        for (phase, remaining_seconds, expected_phase, expected_countdown) in [
 +            (LessonPhase::Class(3), Some(872), "CLASS 3", Some("14:32")),
@@ -3313,3 +3590,100 @@ index 4c0ae87..7ef15cd 100644
      #[test]
      fn media_capability_loss_keeps_fixed_chrome_but_disables_actions() {
          let full = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, all()).unwrap();
+diff --git a/crates/t1-touchbar/src/totp_preview.rs b/crates/t1-touchbar/src/totp_preview.rs
+new file mode 100644
+index 0000000..7921272
+--- /dev/null
++++ b/crates/t1-touchbar/src/totp_preview.rs
+@@ -0,0 +1,91 @@
++use std::io::{self, Read};
++use std::path::Path;
++use std::process::{Child, Command, Stdio};
++use std::sync::mpsc::{self, Receiver};
++use std::thread;
++use std::time::Duration;
++
++const HELPER_TIMEOUT: Duration = Duration::from_secs(25);
++
++pub(crate) struct TotpPreview {
++    child: Child,
++    result: Receiver<[u8; 6]>,
++    copied: bool,
++    deadline: Duration,
++}
++
++impl TotpPreview {
++    pub(crate) fn start(helper: &Path, now: Duration) -> io::Result<Self> {
++        let mut child = Command::new(helper)
++            .arg("copy")
++            .stdin(Stdio::null())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::null())
++            .spawn()?;
++        let mut output = child.stdout.take().expect("requested pipe");
++        let (sender, result) = mpsc::channel();
++        if let Err(error) = thread::Builder::new()
++            .name("t1-totp-preview".into())
++            .spawn(move || {
++                let mut record = [0; 7];
++                if output.read_exact(&mut record).is_ok()
++                    && let Some(code) = parse_code(record)
++                {
++                    let _ = sender.send(code);
++                }
++            })
++        {
++            let _ = child.kill();
++            let _ = child.wait();
++            return Err(error);
++        }
++        Ok(Self {
++            child,
++            result,
++            copied: false,
++            deadline: now + HELPER_TIMEOUT,
++        })
++    }
++
++    pub(crate) fn running(&mut self, now: Duration) -> bool {
++        now < self.deadline && matches!(self.child.try_wait(), Ok(None))
++    }
++
++    pub(crate) fn take_code(&mut self) -> Option<[u8; 6]> {
++        let code = self.result.try_recv().ok()?;
++        self.copied = true;
++        Some(code)
++    }
++
++    pub(crate) const fn copied(&self) -> bool {
++        self.copied
++    }
++}
++
++impl Drop for TotpPreview {
++    fn drop(&mut self) {
++        if matches!(self.child.try_wait(), Ok(None)) {
++            let _ = self.child.kill();
++            let _ = self.child.wait();
++        }
++    }
++}
++
++fn parse_code([digits @ .., newline]: [u8; 7]) -> Option<[u8; 6]> {
++    (newline == b'\n' && digits.iter().all(u8::is_ascii_digit)).then_some(digits)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn accepts_only_a_single_six_digit_record() {
++        let synthetic = [b'0'; 6];
++        let mut record = [b'0'; 7];
++        record[6] = b'\n';
++        assert_eq!(parse_code(record), Some(synthetic));
++        assert_eq!(parse_code(*b"------\n"), None);
++        assert_eq!(parse_code([b'0'; 7]), None);
++    }
++}

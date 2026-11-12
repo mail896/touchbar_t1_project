@@ -1,5 +1,13 @@
 # Third-party notices
 
+## Logo artwork
+
+The BBS Einbeck and LaberPapa PNGs in `docs/assets/` illustrate the author's
+Touch Bar setup. The code license applies to the implementation. Rights in the
+logos belong to their respective owners.
+
+## Renderer icons and type
+
 The built-in Touch Bar renderer contains generated alpha masks made from the following sources. The source fonts and vector files are not shipped.
 
 - [Cupertino Icons 1.0.9](https://pub.dev/packages/cupertino_icons/versions/1.0.9): `assets/CupertinoIcons.ttf`.

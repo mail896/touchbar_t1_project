@@ -95,6 +95,18 @@ h2 { margin: 0 0 1rem; font-size: clamp(1.55rem, 3.5vw, 2.5rem); letter-spacing:
 .card { padding: 1.1rem 1.2rem; }
 .card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
 .card p { margin: 0; color: var(--muted); }
+.integration-views { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+.integration-grid { margin-top: 1.3rem; }
+.logo-links, .related-links { display: flex; flex-wrap: wrap; gap: .7rem 1rem; margin-top: .7rem; }
+.logo-links a { display: grid; align-content: start; gap: .4rem; }
+.logo-links img {
+  width: 5rem;
+  height: 3rem;
+  padding: .32rem;
+  object-fit: contain;
+  border-radius: .3rem;
+  background: #eef4f8;
+}
 .gallery img { aspect-ratio: 16 / 10; object-fit: contain; background: #101722; }
 .gallery figcaption { padding: .75rem 1rem; color: var(--muted); font-size: .9rem; }
 .setup { max-width: 65ch; }

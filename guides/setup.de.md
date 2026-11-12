@@ -126,8 +126,8 @@ mit dem Standard-Renderer.
 
 ## Optionaler KDE-Renderer
 
-Baue ihn im Projektverzeichnis mit Rust/Cargo ab Version 1.88 und demselben
-T1Bridge-Quellstand. Der KDE-Provider nutzt Plasma 6, PipeWire/WirePlumber
+Baue ihn im Projektverzeichnis mit Rust/Cargo ab Version 1.88, ImageMagick
+und demselben T1Bridge-Quellstand. Der KDE-Provider nutzt Plasma 6, PipeWire/WirePlumber
 und den D-Bus der Desktop-Sitzung. Für Medientasten ist `playerctl`
 erforderlich. Für die optionale akustische Rückmeldung installiere
 `pulseaudio-utils`. KDE stellt `qdbus6` und `kreadconfig6` bereit.
@@ -180,9 +180,24 @@ für Stunde 2 mit 420 Sekunden Restzeit, `break 2 120`, `before 0 60`,
 setzt du den absoluten Pfad zu ihrer Desktop-Datei. Starte anschließend den
 Benutzerdienst neu.
 
+Für die beiden Logos von der Projektseite setze diese Variablen anstelle der
+Beispielverknüpfungen.
+
+```ini
+[Service]
+Environment=T1BRIDGE_BRANDED_SHORTCUTS=1
+Environment=T1BRIDGE_SHORTCUT_1=https://bbs-einbeck.de
+Environment=T1BRIDGE_SHORTCUT_2=https://github.com/mail896/
+```
+
+Für den optionalen [UZeit-Adapter](uzeit.de.md) und den [2FA-Helfer](2fa.de.md)
+gibt es eigene Einrichtungsanleitungen.
+
 Mit `t1-touchbar-kde --preview main touchbar.ppm` erzeugst du ein Bild aus
 dem Renderer mit Beispielwerten. Das geht auch auf Rechnern ohne Touch Bar.
-Verfügbar sind `main`, `tools`, `keyboard`, `volume` und `function`.
+Neben `main`, `tools`, `keyboard`, `volume` und `function` gibt es die
+Ansichten `branded`, `branded-tools` und `branded-code` mit Logos,
+Beispielstunde und 2FA-Platzhalter.
 
 [debian-linux]: https://snapshot.debian.org/package/linux/6.12.116-1/
 [deb-port]: https://github.com/vfontanela/macbookpro14-linux-support/releases/tag/v2.0.1

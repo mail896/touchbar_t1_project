@@ -2,7 +2,8 @@
 
 [English](#english) · [Deutsch](#deutsch) · [Project site](https://mail896.github.io/touchbar_t1_project/)
 
-![Custom T1 Touch Bar renderer](docs/assets/touchbar.png)
+![Custom T1 Touch Bar renderer with BBS Einbeck and LaberPapa logos](docs/assets/touchbar-branded.png)
+![Tools with the UZeit lesson countdown, rendered with sample values](docs/assets/touchbar-branded-tools.png)
 
 ## English
 
@@ -10,7 +11,9 @@ A KDE Plasma renderer and desktop-controls provider for the Apple T1 Touch Bar. 
 
 - Adjust display brightness, keyboard backlight and volume with touch sliders and KDE on-screen feedback.
 - Use media and microphone controls, an Fn layer, a terminal shortcut, and CPU status.
-- Configure optional web shortcuts and a local status command for your own setup.
+- Add logo shortcuts to BBS Einbeck and LaberPapa, show the current UZeit lesson and time remaining, or copy a one-time code from the local keyring.
+
+[UZeit web app](https://apps.bbs-einbeck.de/uzeit/) · [UZeit source](https://github.com/mail896/bbs_unterrichtszeit_public) · [UZeit setup](guides/uzeit.en.md) · [2FA setup](guides/2fa.en.md)
 
 [Setup and configuration](guides/setup.en.md) · [Kernel compatibility sources](kernel/) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
@@ -22,7 +25,9 @@ Ein Touch-Bar-Renderer und KDE-Bedienhelfer für Apple-MacBooks mit T1-Chip. Get
 
 - Bildschirmhelligkeit, Tastaturbeleuchtung und Lautstärke über Schieberegler mit KDE-Bildschirmanzeige ändern.
 - Medientasten, Mikrofon-Stummschaltung, Fn-Tasten, Terminal und CPU-Status verwenden.
-- Eigene Webverknüpfungen und einen lokalen Statusbefehl optional einrichten.
+- Über die Logos BBS Einbeck und LaberPapa öffnen, mit UZeit die laufende Stunde und Restzeit anzeigen oder einen Einmalcode aus dem lokalen Schlüsselbund kopieren.
+
+[UZeit-Web-App](https://apps.bbs-einbeck.de/uzeit/) · [UZeit-Quellcode](https://github.com/mail896/bbs_unterrichtszeit_public) · [UZeit einrichten](guides/uzeit.de.md) · [2FA einrichten](guides/2fa.de.md)
 
 [Einrichtung und Konfiguration](guides/setup.de.md) · [Kernel-Quellen zur Kompatibilität](kernel/) · [Drittanbieterhinweise](THIRD_PARTY_NOTICES.md)
 
