@@ -1,0 +1,27 @@
+#!/bin/sh
+# Enable, disable or show the MacBookPro14,2 s2idle power-saving hook.
+set -eu
+
+marker=/etc/macbook-s2idle-powersave.disabled
+
+case ${1:-status} in
+    disable)
+        install -m 0644 /dev/null "$marker"
+        echo "MacBook s2idle power saving disabled for future suspends."
+        ;;
+    enable)
+        rm -f "$marker"
+        echo "MacBook s2idle power saving enabled for future suspends."
+        ;;
+    status)
+        if [ -e "$marker" ]; then
+            echo disabled
+        else
+            echo enabled
+        fi
+        ;;
+    *)
+        echo "usage: $0 {status|enable|disable}" >&2
+        exit 2
+        ;;
+esac

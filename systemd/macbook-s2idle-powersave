@@ -1,0 +1,176 @@
+#!/bin/sh
+# s2idle power saving for MacBookPro14,2.
+# The configuration must explicitly opt in. This hook only handles
+# suspend-to-idle; hibernation and S3/deep sleep are intentionally excluded.
+
+set -u
+
+tag=macbook-s2idle-powersave
+config=/etc/macbook-s2idle-powersave.conf
+state=/run/macbook-s2idle-powersave
+disabled=/etc/macbook-s2idle-powersave.disabled
+
+log()
+{
+    logger -t "$tag" -- "$*"
+}
+
+snapshot()
+{
+    name=$1
+    file="$state/$name"
+    {
+        date --iso-8601=ns
+        printf 'mem_sleep='; cat /sys/power/mem_sleep 2>/dev/null || true
+        printf 'battery_status='; cat /sys/class/power_supply/BAT0/status 2>/dev/null || true
+        printf 'battery_capacity='; cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || true
+        printf 'battery_charge_uah='; cat /sys/class/power_supply/BAT0/charge_now 2>/dev/null || true
+        printf 'battery_voltage_uv='; cat /sys/class/power_supply/BAT0/voltage_now 2>/dev/null || true
+        printf 's0_residency_us='; cat /sys/kernel/debug/pmc_core/slp_s0_residency_usec 2>/dev/null || true
+        printf 'keyboard_backlight='; cat /sys/class/leds/spi::kbd_backlight/brightness 2>/dev/null || true
+        cat /sys/kernel/debug/pmc_core/package_cstate_show 2>/dev/null || true
+        for device in 0000:02:00.0 0000:05:00.0 0000:06:00.0 0000:7b:00.0 0000:7c:00.0 0000:00:14.0; do
+            link="/sys/bus/pci/devices/$device/driver"
+            if [ -L "$link" ]; then
+                printf '%s_driver=%s\n' "$device" "$(basename "$(readlink -f "$link")")"
+            else
+                printf '%s_driver=none\n' "$device"
+            fi
+        done
+    } > "$file"
+}
+
+unbind_if_bound()
+{
+    device=$1
+    expected=$2
+    link="/sys/bus/pci/devices/$device/driver"
+    [ -L "$link" ] || return 0
+    actual=$(basename "$(readlink -f "$link")")
+    if [ "$actual" != "$expected" ]; then
+        log "skip unbind $device: expected $expected, found $actual"
+        return 0
+    fi
+    printf '%s' "$device" > "/sys/bus/pci/drivers/$expected/unbind"
+    : > "$state/unbound-$device-$expected"
+    log "unbound $device from $expected"
+}
+
+bind_if_marked()
+{
+    device=$1
+    driver=$2
+    marker="$state/unbound-$device-$driver"
+    [ -e "$marker" ] || return 0
+    [ -e "/sys/bus/pci/devices/$device" ] || {
+        log "cannot restore missing PCI device $device"
+        return 1
+    }
+    if [ ! -L "/sys/bus/pci/devices/$device/driver" ]; then
+        printf '%s' "$device" > "/sys/bus/pci/drivers/$driver/bind" || {
+            log "failed to restore $device to $driver"
+            return 1
+        }
+    fi
+    log "restored $device to $driver"
+}
+
+external_usb_on_managed_controllers()
+{
+    found=1
+    for dev in /sys/bus/usb/devices/[0-9]*-*; do
+        [ -f "$dev/idVendor" ] || continue
+        path=$(readlink -f "$dev")
+        case "$path" in
+            *'/0000:06:00.0/'*|*'/0000:7c:00.0/'*)
+                log "external USB present: $(basename "$dev") $(cat "$dev/idVendor"):$(cat "$dev/idProduct")"
+                found=0
+                ;;
+        esac
+    done
+    return "$found"
+}
+
+[ -r /sys/class/dmi/id/product_name ] || exit 0
+[ "$(cat /sys/class/dmi/id/product_name)" = MacBookPro14,2 ] || exit 0
+[ -e "$disabled" ] && exit 0
+[ -r "$config" ] || exit 0
+
+# shellcheck disable=SC1090
+. "$config"
+[ "${ENABLED:-0}" = 1 ] || exit 0
+
+[ "${ALLOW_REGULAR_BOOT:-0}" = 1 ] || exit 0
+
+sleep_action=${SYSTEMD_SLEEP_ACTION:-${2:-}}
+[ "$sleep_action" = suspend ] || exit 0
+grep -q '\[s2idle\]' /sys/power/mem_sleep || exit 0
+
+mode=${MODE:-wifi}
+require_empty=${REQUIRE_EXTERNAL_USB_EMPTY:-1}
+
+case ${1:-} in
+    pre)
+        rm -rf "$state"
+        mkdir -p "$state"
+        snapshot pre
+        log "pre-s2idle power save begins (mode=$mode)"
+
+        # PowerDevil did not consistently blank this LED in s2idle. Preserve
+        # the user's value and force it off for the complete sleep interval.
+        if [ -w /sys/class/leds/spi::kbd_backlight/brightness ]; then
+            cat /sys/class/leds/spi::kbd_backlight/brightness > "$state/kbd-backlight"
+            printf '0' > /sys/class/leds/spi::kbd_backlight/brightness
+            log "keyboard backlight forced off"
+        fi
+
+        # This custom driver intentionally keeps Wi-Fi in D0 for normal
+        # suspend reliability. In wifi/full mode, remove it completely and
+        # recreate it after resume. Controller-only mode keeps Wi-Fi as the
+        # recovery connection.
+        case "$mode" in
+            wifi|full)
+                unbind_if_bound 0000:02:00.0 brcmfmac
+                ;;
+        esac
+
+        case "$mode" in
+            controllers|full)
+            if [ "$require_empty" = 1 ] && external_usb_on_managed_controllers; then
+                : > "$state/controllers-skipped-external-usb"
+                log "controller parking skipped because external USB is attached"
+            else
+                # Park downstream USB first, then both Alpine Ridge hosts.
+                # The internal 0000:00:14.0 xHCI/T1 path is never touched.
+                unbind_if_bound 0000:06:00.0 xhci_hcd
+                unbind_if_bound 0000:7c:00.0 xhci_hcd
+                unbind_if_bound 0000:05:00.0 thunderbolt
+                unbind_if_bound 0000:7b:00.0 thunderbolt
+            fi
+                ;;
+        esac
+        log "pre-s2idle power save complete"
+        ;;
+    post)
+        [ -d "$state" ] || exit 0
+        log "post-s2idle restore begins"
+
+        # Restore parent controllers before their xHCI children.
+        bind_if_marked 0000:05:00.0 thunderbolt || true
+        bind_if_marked 0000:7b:00.0 thunderbolt || true
+        sleep 1
+        bind_if_marked 0000:06:00.0 xhci_hcd || true
+        bind_if_marked 0000:7c:00.0 xhci_hcd || true
+        sleep 1
+        bind_if_marked 0000:02:00.0 brcmfmac || true
+        udevadm settle --timeout=15 || log "udev settle timed out"
+        if [ -r "$state/kbd-backlight" ] && [ -w /sys/class/leds/spi::kbd_backlight/brightness ]; then
+            cat "$state/kbd-backlight" > /sys/class/leds/spi::kbd_backlight/brightness
+            log "keyboard backlight restored"
+        fi
+        snapshot post
+        log "post-s2idle restore complete"
+        ;;
+esac
+
+exit 0

@@ -89,10 +89,10 @@ index 32669af..9f10836 100644
  [lints]
 diff --git a/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
 new file mode 100644
-index 0000000..bfccecc
+index 0000000..7ac09e2
 --- /dev/null
 +++ b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,117 @@
 +use std::env;
 +use std::fs::File;
 +use std::io::{BufWriter, Write};
@@ -182,6 +182,8 @@ index 0000000..bfccecc
 +        microphone_muted: Some(false),
 +        cpu_temperature: Some(52),
 +        cpu_cores: [Some(18), Some(27)],
++        battery_percentage: Some(66),
++        external_power: true,
 +        lesson: branded.then_some(LessonStatus {
 +            phase: LessonPhase::Class(2),
 +            remaining_seconds: Some(7 * 60),
@@ -209,7 +211,7 @@ index 0000000..bfccecc
 +    ExitCode::from(2)
 +}
 diff --git a/crates/t1-touchbar/src/builtin_renderer.rs b/crates/t1-touchbar/src/builtin_renderer.rs
-index 90cead9..6a46aa0 100644
+index 90cead9..7c5b2dd 100644
 --- a/crates/t1-touchbar/src/builtin_renderer.rs
 +++ b/crates/t1-touchbar/src/builtin_renderer.rs
 @@ -1,30 +1,39 @@
@@ -259,7 +261,7 @@ index 90cead9..6a46aa0 100644
  use crate::touch_id_overlay::TouchIdOverlay;
  
  const BUFFER_ID: u32 = 1;
-@@ -40,6 +49,12 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
+@@ -40,6 +49,13 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
  const HOLD_REPEAT_INTERVAL: Duration = Duration::from_millis(90);
  const OVERLAY_FADE_DURATION: Duration = Duration::from_millis(150);
  const ENROLLMENT_PROGRESS_DURATION: Duration = Duration::from_millis(220);
@@ -268,11 +270,12 @@ index 90cead9..6a46aa0 100644
 +const BRIGHTNESS_READ_INTERVAL: Duration = Duration::from_millis(500);
 +const SLIDER_PANEL_TIMEOUT: Duration = Duration::from_secs(5);
 +const CPU_METRICS_INTERVAL: Duration = Duration::from_secs(1);
++const BATTERY_INTERVAL: Duration = Duration::from_secs(15);
 +const TOTP_DISPLAY_DURATION: Duration = Duration::from_secs(5);
  
  /// Static, redaction-safe failure from one hardware-service connection.
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -71,13 +86,44 @@ impl std::error::Error for BuiltinRendererError {}
+@@ -71,13 +87,44 @@ impl std::error::Error for BuiltinRendererError {}
  
  /// Runs the built-in renderer and reconnects forever with capped backoff.
  pub fn run_forever(provider_path: Option<&Path>) {
@@ -319,7 +322,7 @@ index 90cead9..6a46aa0 100644
          ) {
              eprintln!("t1-touchbar: {error}; reconnecting");
          }
-@@ -90,7 +136,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
+@@ -90,7 +137,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
      delay.saturating_mul(2).min(MAX_RECONNECT_DELAY)
  }
  
@@ -331,7 +334,7 @@ index 90cead9..6a46aa0 100644
      let NegotiatedConnection {
          mut connection,
          request_ids,
-@@ -102,7 +151,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+@@ -102,7 +152,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
      let mut session = RendererSession::new(
          dimensions,
          request_ids,
@@ -340,7 +343,7 @@ index 90cead9..6a46aa0 100644
      )?;
      session.register(&connection)?;
      let overlay_watcher = OverlayWatcher::start();
-@@ -114,6 +163,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+@@ -114,6 +164,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
              session.set_desktop_state(state)?;
              session.submit_if_ready(&connection)?;
          }
@@ -358,7 +361,7 @@ index 90cead9..6a46aa0 100644
          if let Some(observation) = overlay_watcher.take_latest() {
              let overlay = observation.overlay();
              session.set_overlay(
-@@ -321,6 +381,7 @@ enum PendingRequest {
+@@ -321,6 +382,7 @@ enum PendingRequest {
      TapKeys,
      CancelTouchId,
      HardwareAction(Option<DesktopAction>),
@@ -366,7 +369,7 @@ index 90cead9..6a46aa0 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -339,6 +400,14 @@ struct RendererSession {
+@@ -339,6 +401,15 @@ struct RendererSession {
      pending_desktop_state: Option<DesktopState>,
      display_off: bool,
      levels: StockLevels,
@@ -377,11 +380,12 @@ index 90cead9..6a46aa0 100644
 +    totp_preview: Option<TotpPreview>,
 +    totp_display_deadline: Option<Duration>,
 +    next_cpu_metrics_read: Duration,
++    next_battery_read: Duration,
 +    core_usage: Option<CoreUsage>,
      touch_id: TouchIdOverlay,
      overlay_state: Option<OverlayState>,
      overlay_visual_state: Option<OverlayState>,
-@@ -390,6 +459,14 @@ impl RendererSession {
+@@ -390,6 +461,15 @@ impl RendererSession {
              pending_desktop_state: None,
              display_off: false,
              levels: StockLevels::default(),
@@ -392,11 +396,12 @@ index 90cead9..6a46aa0 100644
 +            totp_preview: None,
 +            totp_display_deadline: None,
 +            next_cpu_metrics_read: Duration::ZERO,
++            next_battery_read: Duration::ZERO,
 +            core_usage: None,
              touch_id,
              overlay_state: None,
              overlay_visual_state: None,
-@@ -463,6 +540,13 @@ impl RendererSession {
+@@ -463,6 +543,13 @@ impl RendererSession {
                  if !in_flight.acknowledged || release.frame_id != in_flight.frame_id {
                      return Err(BuiltinRendererError::Protocol);
                  }
@@ -410,7 +415,7 @@ index 90cead9..6a46aa0 100644
                  self.in_flight = None;
                  self.submit_if_ready(connection)
              }
-@@ -472,6 +556,19 @@ impl RendererSession {
+@@ -472,6 +559,19 @@ impl RendererSession {
                  }
                  let outcome = self.observe_input(frame)?;
                  self.dirty |= outcome.redraw;
@@ -430,7 +435,7 @@ index 90cead9..6a46aa0 100644
                  for action in outcome.actions {
                      self.dispatch(action, connection, provider)?;
                  }
-@@ -525,6 +622,17 @@ impl RendererSession {
+@@ -525,6 +625,17 @@ impl RendererSession {
                  ));
                  Ok(())
              }
@@ -448,7 +453,7 @@ index 90cead9..6a46aa0 100644
              PendingRequest::TapKeys => Ok(()),
              PendingRequest::Register => Err(BuiltinRendererError::Protocol),
          }
-@@ -551,6 +659,7 @@ impl RendererSession {
+@@ -551,6 +662,7 @@ impl RendererSession {
          match pending {
              PendingRequest::TapKeys
              | PendingRequest::CancelTouchId
@@ -456,7 +461,7 @@ index 90cead9..6a46aa0 100644
              | PendingRequest::HardwareAction(_) => {
                  eprintln!("t1-touchbar: typed action was rejected");
                  Ok(())
-@@ -572,6 +681,11 @@ impl RendererSession {
+@@ -572,6 +684,11 @@ impl RendererSession {
          &mut self,
          mut frame: WireInputFrame,
      ) -> Result<InputOutcome, BuiltinRendererError> {
@@ -468,7 +473,7 @@ index 90cead9..6a46aa0 100644
          if self.display_off || self.input.wait_for_touch_release {
              self.input.wait_for_touch_release = frame.contacts.iter().any(|contact| contact.tip);
              frame.contacts.clear();
-@@ -635,31 +749,18 @@ impl RendererSession {
+@@ -635,31 +752,18 @@ impl RendererSession {
              return self.send_keys(&[key], connection);
          }
          match action {
@@ -511,13 +516,14 @@ index 90cead9..6a46aa0 100644
                  self.levels.muted = !self.levels.muted;
                  self.dirty = true;
                  dispatch_desktop(provider, DesktopAction::ToggleMute);
-@@ -688,10 +789,84 @@ impl RendererSession {
+@@ -688,10 +792,88 @@ impl RendererSession {
                  dispatch_desktop(provider, DesktopAction::MediaNext);
                  Ok(())
              }
 +            StockAction::OpenTerminal
 +            | StockAction::LaunchSchedule
 +            | StockAction::OpenSystemMonitor
++            | StockAction::OpenPowerSettings
 +            | StockAction::OpenShortcutOne
 +            | StockAction::OpenShortcutTwo => {
 +                self.launch_desktop_action(action);
@@ -569,6 +575,9 @@ index 90cead9..6a46aa0 100644
 +                "/usr/bin/plasma-systemmonitor",
 +                &["--page-id", "processes.page"],
 +            ),
++            StockAction::OpenPowerSettings => {
++                launch_desktop_app("/usr/bin/systemsettings", &["kcm_powerdevilprofilesconfig"])
++            }
 +            StockAction::OpenShortcutOne => {
 +                shortcut_url("T1BRIDGE_SHORTCUT_1").and_then(|url| open_website(&url))
 +            }
@@ -596,7 +605,7 @@ index 90cead9..6a46aa0 100644
      fn send_hardware_action(
          &mut self,
          action: ClientMessage,
-@@ -789,6 +964,9 @@ impl RendererSession {
+@@ -789,6 +971,9 @@ impl RendererSession {
      }
  
      fn set_overlay(&mut self, state: Option<OverlayState>, progress: Option<u8>) {
@@ -606,7 +615,7 @@ index 90cead9..6a46aa0 100644
          if self.overlay_state == state && self.enrollment_progress == progress {
              return;
          }
-@@ -832,6 +1010,38 @@ impl RendererSession {
+@@ -832,6 +1017,46 @@ impl RendererSession {
          self.now = now;
          self.advance_overlay_fade(now);
          self.advance_enrollment_progress(now);
@@ -633,6 +642,14 @@ index 90cead9..6a46aa0 100644
 +            self.levels.cpu_temperature = temperature;
 +            self.levels.cpu_cores = cores;
 +        }
++        if !self.display_off && now >= self.next_battery_read {
++            self.next_battery_read = now + BATTERY_INTERVAL;
++            let (percentage, external_power) = read_power_status();
++            self.dirty |= self.levels.battery_percentage != percentage
++                || self.levels.external_power != external_power;
++            self.levels.battery_percentage = percentage;
++            self.levels.external_power = external_power;
++        }
 +        if self
 +            .hardware_capabilities
 +            .contains(StockCapabilities::EXTENDED_CONTROLS)
@@ -645,7 +662,7 @@ index 90cead9..6a46aa0 100644
          if !self.display_off
              && !self.input.wait_for_touch_release
              && let Some(action) = self.input.take_repeat(now)
-@@ -841,6 +1051,173 @@ impl RendererSession {
+@@ -841,6 +1066,173 @@ impl RendererSession {
          self.submit_if_ready(connection)
      }
  
@@ -819,7 +836,7 @@ index 90cead9..6a46aa0 100644
      fn advance_overlay_fade(&mut self, now: Duration) {
          if self.overlay_opacity == self.overlay_target_opacity {
              return;
-@@ -894,16 +1271,15 @@ impl RendererSession {
+@@ -894,16 +1286,15 @@ impl RendererSession {
          if self.display_off != state.display_off {
              self.display_off = state.display_off;
              if self.display_off {
@@ -840,7 +857,7 @@ index 90cead9..6a46aa0 100644
              return Ok(());
          }
          if !self.input.is_idle() {
-@@ -930,17 +1306,36 @@ impl RendererSession {
+@@ -930,17 +1321,36 @@ impl RendererSession {
              self.dimensions.height(),
              capabilities,
          )
@@ -880,7 +897,7 @@ index 90cead9..6a46aa0 100644
      fn allocate_request(&mut self, kind: PendingRequest) -> Result<u32, BuiltinRendererError> {
          if self.pending.len() >= MAX_PENDING_REQUESTS {
              return Err(BuiltinRendererError::Protocol);
-@@ -960,6 +1355,138 @@ impl RendererSession {
+@@ -960,6 +1370,188 @@ impl RendererSession {
      }
  }
  
@@ -955,6 +972,56 @@ index 90cead9..6a46aa0 100644
 +    None
 +}
 +
++fn read_power_status() -> (Option<u8>, bool) {
++    let mut reported_percentage = None;
++    let mut charge = None;
++    let mut charge_full = None;
++    let mut energy = None;
++    let mut energy_full = None;
++    let mut external_power = false;
++    let Some(entries) = fs::read_dir("/sys/class/power_supply").ok() else {
++        return (reported_percentage, external_power);
++    };
++    for entry in entries.flatten() {
++        let device = entry.path();
++        let Some(kind) = fs::read_to_string(device.join("type")).ok() else {
++            continue;
++        };
++        if kind.trim() == "Battery" {
++            reported_percentage = read_power_value(&device.join("capacity"))
++                .and_then(|value| u8::try_from(value.min(100)).ok());
++            charge = read_power_value(&device.join("charge_now"));
++            charge_full = read_power_value(&device.join("charge_full"));
++            energy = read_power_value(&device.join("energy_now"));
++            energy_full = read_power_value(&device.join("energy_full"));
++        } else if fs::read_to_string(device.join("online")).is_ok_and(|value| value.trim() == "1") {
++            external_power = true;
++        }
++    }
++    let percentage = charge
++        .zip(charge_full)
++        .and_then(|(current, full)| relative_charge_percentage(current, full))
++        .or_else(|| {
++            energy
++                .zip(energy_full)
++                .and_then(|(current, full)| relative_charge_percentage(current, full))
++        })
++        .or(reported_percentage);
++    (percentage, external_power)
++}
++
++fn read_power_value(path: &Path) -> Option<u64> {
++    fs::read_to_string(path).ok()?.trim().parse().ok()
++}
++
++fn relative_charge_percentage(current: u64, full: u64) -> Option<u8> {
++    if full == 0 {
++        return None;
++    }
++    let rounded = current.saturating_mul(100).saturating_add(full / 2) / full;
++    u8::try_from(rounded.min(100)).ok()
++}
++
 +fn shortcut_url(variable: &str) -> Option<String> {
 +    let url = env::var(variable).ok()?;
 +    let target = url
@@ -1019,7 +1086,7 @@ index 90cead9..6a46aa0 100644
  const fn wire_step(direction: StepDirection) -> WireStepDirection {
      match direction {
          StepDirection::Down => WireStepDirection::Down,
-@@ -1007,6 +1534,8 @@ struct InputOutcome {
+@@ -1007,6 +1599,8 @@ struct InputOutcome {
      redraw: bool,
      actions: Vec<StockAction>,
      cancel_touch_id: bool,
@@ -1028,7 +1095,7 @@ index 90cead9..6a46aa0 100644
  }
  
  struct InputInterpreter {
-@@ -1018,6 +1547,7 @@ struct InputInterpreter {
+@@ -1018,6 +1612,7 @@ struct InputInterpreter {
      pressed: Option<StockAction>,
      repeat: Option<RepeatState>,
      suppress_tap: Option<StockAction>,
@@ -1036,7 +1103,7 @@ index 90cead9..6a46aa0 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -1042,6 +1572,7 @@ impl InputInterpreter {
+@@ -1042,6 +1637,7 @@ impl InputInterpreter {
              pressed: None,
              repeat: None,
              suppress_tap: None,
@@ -1044,7 +1111,7 @@ index 90cead9..6a46aa0 100644
          })
      }
  
-@@ -1053,6 +1584,10 @@ impl InputInterpreter {
+@@ -1053,6 +1649,10 @@ impl InputInterpreter {
          self.pressed
      }
  
@@ -1055,7 +1122,7 @@ index 90cead9..6a46aa0 100644
      fn is_idle(&self) -> bool {
          !self.wait_for_touch_release && self.gestures.is_idle()
      }
-@@ -1092,9 +1627,10 @@ impl InputInterpreter {
+@@ -1092,9 +1692,10 @@ impl InputInterpreter {
          let pressed = contacts
              .first()
              .filter(|contact| {
@@ -1069,7 +1136,7 @@ index 90cead9..6a46aa0 100644
              })
              .and_then(|contact| self.stock.action_at(*contact, self.fn_pressed));
          redraw |= self.pressed != pressed;
-@@ -1118,9 +1654,60 @@ impl InputInterpreter {
+@@ -1118,9 +1719,60 @@ impl InputInterpreter {
              .gestures
              .ingest_frame(Duration::from_nanos(frame.monotonic_ns), &contacts)
              .map_err(|_| BuiltinRendererError::Gesture)?;
@@ -1100,9 +1167,9 @@ index 90cead9..6a46aa0 100644
 +                    }
 +                }
 +                Gesture::Move { to, .. } | Gesture::Drag { to, .. }
-+                    if let Some((id, control)) = self.slider_contact
-+                        && id == to.id() =>
++                    if self.slider_contact.is_some_and(|(id, _)| id == to.id()) =>
 +                {
++                    let control = self.slider_contact.expect("matched slider contact").1;
 +                    if !self.fn_pressed {
 +                        slider_level = self
 +                            .stock
@@ -1130,7 +1197,7 @@ index 90cead9..6a46aa0 100644
              if matches!(
                  gesture,
                  crate::gesture::Gesture::DragStart(_) | crate::gesture::Gesture::Drag { .. }
-@@ -1161,11 +1748,13 @@ impl InputInterpreter {
+@@ -1161,11 +1813,13 @@ impl InputInterpreter {
                  actions.push(action);
              }
          }
@@ -1146,7 +1213,7 @@ index 90cead9..6a46aa0 100644
      }
  
      fn take_repeat(&mut self, now: Duration) -> Option<StockAction> {
-@@ -1187,6 +1776,7 @@ impl InputInterpreter {
+@@ -1187,6 +1841,7 @@ impl InputInterpreter {
          self.wait_for_touch_release |= !self.gestures.is_idle();
          self.gestures.cancel_all();
          self.pressed = None;
@@ -1154,7 +1221,7 @@ index 90cead9..6a46aa0 100644
          self.cancel_repeat();
      }
  }
-@@ -1230,7 +1820,17 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
+@@ -1230,7 +1885,18 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
          | StockAction::StepVolume(_)
          | StockAction::MediaPrevious
          | StockAction::MediaPlayPause
@@ -1168,12 +1235,13 @@ index 90cead9..6a46aa0 100644
 +        | StockAction::LaunchSchedule
 +        | StockAction::CopyTotp
 +        | StockAction::OpenSystemMonitor
++        | StockAction::OpenPowerSettings
 +        | StockAction::OpenShortcutOne
 +        | StockAction::OpenShortcutTwo => return None,
      })
  }
  
-@@ -1842,6 +2442,8 @@ mod tests {
+@@ -1842,6 +2508,8 @@ mod tests {
                  redraw: true,
                  actions: Vec::new(),
                  cancel_touch_id: false,
@@ -1182,7 +1250,7 @@ index 90cead9..6a46aa0 100644
              }
          );
          assert!(interpreter.fn_pressed());
-@@ -1861,6 +2463,146 @@ mod tests {
+@@ -1861,6 +2529,146 @@ mod tests {
          );
      }
  
@@ -1329,6 +1397,21 @@ index 90cead9..6a46aa0 100644
      #[test]
      fn escape_remains_active_without_fn_and_function_regions_do_not() {
          let mut interpreter = new_interpreter();
+@@ -2095,6 +2903,14 @@ mod tests {
+         assert_eq!(ids.next(&pending), Ok(2));
+     }
+ 
++    #[test]
++    fn battery_charge_uses_the_learned_full_capacity() {
++        assert_eq!(relative_charge_percentage(3_541_000, 3_589_000), Some(99));
++        assert_eq!(relative_charge_percentage(4_315_000, 4_315_000), Some(100));
++        assert_eq!(relative_charge_percentage(5_000_000, 4_315_000), Some(100));
++        assert_eq!(relative_charge_percentage(1, 0), None);
++    }
++
+     #[test]
+     fn every_stock_action_has_the_exact_wire_key() {
+         let expected = [
 diff --git a/crates/t1-touchbar/src/cpu_usage.rs b/crates/t1-touchbar/src/cpu_usage.rs
 new file mode 100644
 index 0000000..eba7759
@@ -2017,7 +2100,7 @@ index 0000000..7ba3ef2
 +    Ok(())
 +}
 diff --git a/crates/t1-touchbar/src/stock_art.rs b/crates/t1-touchbar/src/stock_art.rs
-index ad49165..e85d2a5 100644
+index ad49165..1b80a2b 100644
 --- a/crates/t1-touchbar/src/stock_art.rs
 +++ b/crates/t1-touchbar/src/stock_art.rs
 @@ -7,19 +7,39 @@ use crate::stock_labels::AlphaMask;
@@ -2060,7 +2143,7 @@ index ad49165..e85d2a5 100644
  }
  
  pub(crate) fn draw_rounded_plate(
-@@ -94,18 +114,317 @@ pub(crate) fn draw_symbol(
+@@ -94,18 +114,431 @@ pub(crate) fn draw_symbol(
      let mask = match symbol {
          Symbol::DisplayDown => stock_icons::DISPLAY_DOWN,
          Symbol::DisplayUp => stock_icons::DISPLAY_UP,
@@ -2255,6 +2338,120 @@ index ad49165..e85d2a5 100644
 +    draw_panel_text_runs(frame, bounds, &[(text, color)])
 +}
 +
++/// Draws an antialiased battery percentage using compact vector segments.
++pub(crate) fn draw_battery_percentage(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    percentage: u8,
++    color: Rgb,
++) -> Result<(), FramebufferError> {
++    let percentage = percentage.min(100);
++    let digits = percentage.to_string();
++    let digit_count = f64::from(u32::try_from(digits.len()).unwrap_or(3));
++    let digit_width = 0.56;
++    let gap = 0.09;
++    let percent_width = 0.50;
++    let design_width = digit_count * digit_width + digit_count * gap + percent_width;
++    let scale = (f64::from(bounds.width) / design_width).min(f64::from(bounds.height));
++    let left = (f64::from(bounds.width) - design_width * scale) / 2.0;
++    let top = (f64::from(bounds.height) - scale) / 2.0;
++    let mask = rasterize(bounds.width, bounds.height, |x, y| {
++        let design_x = (x - left) / scale;
++        let design_y = (y - top) / scale;
++        if !(0.0..=1.0).contains(&design_y) {
++            return false;
++        }
++        for (index, digit) in (0_u32..).zip(digits.bytes()) {
++            let origin = f64::from(index) * (digit_width + gap);
++            if smooth_digit_contains(digit, design_x - origin, design_y) {
++                return true;
++            }
++        }
++        let percent_left = digit_count * (digit_width + gap);
++        smooth_percent_contains(design_x - percent_left, design_y)
++    });
++    frame.blend_mask(bounds, &mask, color)
++}
++
++/// Draws the antialiased charging bolt used inside the battery.
++pub(crate) fn draw_battery_bolt(
++    frame: &mut Xrgb8888Frame<'_>,
++    bounds: Rectangle,
++    color: Rgb,
++) -> Result<(), FramebufferError> {
++    const POINTS: [(f64, f64); 6] = [
++        (0.58, 0.02),
++        (0.12, 0.55),
++        (0.43, 0.55),
++        (0.28, 0.98),
++        (0.88, 0.37),
++        (0.54, 0.37),
++    ];
++    let mask = rasterize(bounds.width, bounds.height, |x, y| {
++        let x = x / f64::from(bounds.width);
++        let y = y / f64::from(bounds.height);
++        let mut inside = false;
++        let mut previous = POINTS.len() - 1;
++        for (current, &(current_x, current_y)) in POINTS.iter().enumerate() {
++            let (previous_x, previous_y) = POINTS[previous];
++            if (current_y > y) != (previous_y > y)
++                && x < (previous_x - current_x) * (y - current_y) / (previous_y - current_y)
++                    + current_x
++            {
++                inside = !inside;
++            }
++            previous = current;
++        }
++        inside
++    });
++    frame.blend_mask(bounds, &mask, color)
++}
++
++fn smooth_digit_contains(digit: u8, x: f64, y: f64) -> bool {
++    const LINES: [((f64, f64), (f64, f64)); 7] = [
++        ((0.12, 0.08), (0.44, 0.08)),
++        ((0.49, 0.13), (0.49, 0.45)),
++        ((0.49, 0.55), (0.49, 0.87)),
++        ((0.12, 0.92), (0.44, 0.92)),
++        ((0.07, 0.55), (0.07, 0.87)),
++        ((0.07, 0.13), (0.07, 0.45)),
++        ((0.12, 0.50), (0.44, 0.50)),
++    ];
++    let segments = match digit {
++        b'0' => 0b0011_1111,
++        b'1' => 0b0000_0110,
++        b'2' => 0b0101_1011,
++        b'3' => 0b0100_1111,
++        b'4' => 0b0110_0110,
++        b'5' => 0b0110_1101,
++        b'6' => 0b0111_1101,
++        b'7' => 0b0000_0111,
++        b'8' => 0b0111_1111,
++        b'9' => 0b0110_1111,
++        _ => 0,
++    };
++    LINES.iter().enumerate().any(|(index, &(start, end))| {
++        segments & (1 << index) != 0 && line_distance(x, y, start, end) <= 0.055
++    })
++}
++
++fn smooth_percent_contains(x: f64, y: f64) -> bool {
++    let upper = (x - 0.13).hypot(y - 0.24);
++    let lower = (x - 0.38).hypot(y - 0.76);
++    (0.055..=0.105).contains(&upper)
++        || (0.055..=0.105).contains(&lower)
++        || line_distance(x, y, (0.09, 0.84), (0.42, 0.16)) <= 0.025
++}
++
++fn line_distance(x: f64, y: f64, start: (f64, f64), end: (f64, f64)) -> f64 {
++    let delta_x = end.0 - start.0;
++    let delta_y = end.1 - start.1;
++    let length_squared = delta_x * delta_x + delta_y * delta_y;
++    let position =
++        (((x - start.0) * delta_x + (y - start.1) * delta_y) / length_squared).clamp(0.0, 1.0);
++    (x - (start.0 + position * delta_x)).hypot(y - (start.1 + position * delta_y))
++}
++
 +pub(crate) fn draw_panel_text_runs(
 +    frame: &mut Xrgb8888Frame<'_>,
 +    bounds: Rectangle,
@@ -2379,10 +2576,10 @@ index ad49165..e85d2a5 100644
      u32::try_from(
          (u64::from(native) * u64::from(plate_height)).div_ceil(u64::from(NATIVE_PLATE_HEIGHT)),
 diff --git a/crates/t1-touchbar/src/stock_slice.rs b/crates/t1-touchbar/src/stock_slice.rs
-index 4c0ae87..2cd98b2 100644
+index 4c0ae87..7de1a20 100644
 --- a/crates/t1-touchbar/src/stock_slice.rs
 +++ b/crates/t1-touchbar/src/stock_slice.rs
-@@ -4,16 +4,34 @@ use std::{error::Error, fmt};
+@@ -4,16 +4,37 @@ use std::{error::Error, fmt};
  
  use crate::framebuffer::{FramebufferError, Rectangle, Rgb, Xrgb8888Frame};
  use crate::gesture::{DisplayContact, Gesture};
@@ -2414,12 +2611,15 @@ index 4c0ae87..2cd98b2 100644
 +const MAX_SLIDER_LEVEL: u8 = 100;
 +const MAIN_SLIDER_LEFT: u32 = 194;
 +const PANEL_SLIDER_LEFT: u32 = 390;
-+const SLIDER_WIDTH: u32 = 680;
++const MAIN_SLIDER_WIDTH: u32 = 600;
++const PANEL_SLIDER_WIDTH: u32 = 680;
++const BATTERY_LEFT: u32 = 810;
++const BATTERY_WIDTH: u32 = 154;
 +const CPU_READOUT_DESIGN_WIDTH: u32 = 510;
  
  const BACKGROUND: Rgb = Rgb {
      red: 0,
-@@ -35,6 +53,31 @@ const LABEL: Rgb = Rgb {
+@@ -35,6 +56,46 @@ const LABEL: Rgb = Rgb {
      green: 242,
      blue: 242,
  };
@@ -2448,10 +2648,25 @@ index 4c0ae87..2cd98b2 100644
 +    green: 111,
 +    blue: 120,
 +};
++const BATTERY_GREEN: Rgb = Rgb {
++    red: 100,
++    green: 220,
++    blue: 125,
++};
++const BATTERY_ORANGE: Rgb = Rgb {
++    red: 255,
++    green: 174,
++    blue: 66,
++};
++const BATTERY_RED: Rgb = Rgb {
++    red: 255,
++    green: 82,
++    blue: 82,
++};
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  pub enum FunctionKey {
-@@ -60,13 +103,19 @@ pub enum StepDirection {
+@@ -60,13 +121,19 @@ pub enum StepDirection {
  
  /// Independently available default-renderer controls.
  #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2472,7 +2687,7 @@ index 4c0ae87..2cd98b2 100644
  
      #[must_use]
      pub const fn contains(self, capability: Self) -> bool {
-@@ -82,14 +131,106 @@ impl std::ops::BitOr for StockCapabilities {
+@@ -82,14 +149,110 @@ impl std::ops::BitOr for StockCapabilities {
      }
  }
  
@@ -2489,6 +2704,8 @@ index 4c0ae87..2cd98b2 100644
 +    pub microphone_muted: Option<bool>,
 +    pub cpu_temperature: Option<i16>,
 +    pub cpu_cores: [Option<u8>; 2],
++    pub battery_percentage: Option<u8>,
++    pub external_power: bool,
 +    pub lesson: Option<LessonStatus>,
 +    pub totp_code: Option<[u8; 6]>,
 +}
@@ -2504,6 +2721,8 @@ index 4c0ae87..2cd98b2 100644
 +            .field("microphone_muted", &self.microphone_muted)
 +            .field("cpu_temperature", &self.cpu_temperature)
 +            .field("cpu_cores", &self.cpu_cores)
++            .field("battery_percentage", &self.battery_percentage)
++            .field("external_power", &self.external_power)
 +            .field("lesson", &self.lesson)
 +            .finish_non_exhaustive()
 +    }
@@ -2527,11 +2746,11 @@ index 4c0ae87..2cd98b2 100644
 +impl LessonStatus {
 +    fn label_parts(self) -> (String, Option<String>) {
 +        let title = match self.phase {
-+            LessonPhase::Class(hour) => format!("CLASS {hour}"),
-+            LessonPhase::Break(_) => String::from("BREAK"),
++            LessonPhase::Class(hour) => format!("{hour}. STD."),
++            LessonPhase::Break(_) => String::from("PAUSE"),
 +            LessonPhase::BeforeSchool => String::from("START"),
-+            LessonPhase::AfterSchool => return (String::from("DONE"), None),
-+            LessonPhase::Free => return (String::from("FREE"), None),
++            LessonPhase::AfterSchool => return (String::from("ENDE"), None),
++            LessonPhase::Free => return (String::from("FREI"), None),
 +        };
 +        let countdown = self
 +            .remaining_seconds
@@ -2582,7 +2801,7 @@ index 4c0ae87..2cd98b2 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -103,6 +244,16 @@ pub enum StockAction {
+@@ -103,6 +266,17 @@ pub enum StockAction {
      MediaPrevious,
      MediaPlayPause,
      MediaNext,
@@ -2596,10 +2815,11 @@ index 4c0ae87..2cd98b2 100644
 +    OpenShortcutOne,
 +    OpenShortcutTwo,
 +    OpenSystemMonitor,
++    OpenPowerSettings,
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -149,6 +300,13 @@ enum Control {
+@@ -149,6 +323,13 @@ enum Control {
      Mute,
      VolumeDown,
      VolumeUp,
@@ -2613,7 +2833,7 @@ index 4c0ae87..2cd98b2 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -211,6 +369,100 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
+@@ -211,6 +392,100 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
      },
  ];
  
@@ -2714,7 +2934,7 @@ index 4c0ae87..2cd98b2 100644
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  struct LaidOutControl {
      control: Control,
-@@ -223,6 +475,8 @@ pub struct StockBar {
+@@ -223,6 +498,8 @@ pub struct StockBar {
      width: u32,
      height: u32,
      capabilities: StockCapabilities,
@@ -2723,7 +2943,7 @@ index 4c0ae87..2cd98b2 100644
  }
  
  impl StockBar {
-@@ -241,6 +495,8 @@ impl StockBar {
+@@ -241,6 +518,8 @@ impl StockBar {
                  width,
                  height,
                  capabilities,
@@ -2732,7 +2952,7 @@ index 4c0ae87..2cd98b2 100644
              })
          }
      }
-@@ -255,6 +511,43 @@ impl StockBar {
+@@ -255,6 +534,43 @@ impl StockBar {
          self.height
      }
  
@@ -2776,7 +2996,7 @@ index 4c0ae87..2cd98b2 100644
      #[must_use]
      pub(crate) fn escape_right(self) -> u32 {
          let bounds = self.escape_bounds();
-@@ -290,10 +583,32 @@ impl StockBar {
+@@ -290,10 +606,32 @@ impl StockBar {
          }
          frame.clear(BACKGROUND);
          if fn_held {
@@ -2811,7 +3031,7 @@ index 4c0ae87..2cd98b2 100644
      }
  
      /// Maps a completed tap to one currently visible action.
-@@ -302,7 +617,37 @@ impl StockBar {
+@@ -302,7 +640,37 @@ impl StockBar {
          let Gesture::Tap(contact) = gesture else {
              return None;
          };
@@ -2850,12 +3070,21 @@ index 4c0ae87..2cd98b2 100644
      }
  
      /// Maps an active display contact to the control beneath it.
-@@ -319,28 +664,220 @@ impl StockBar {
+@@ -319,29 +687,271 @@ impl StockBar {
          if contains(self.escape_bounds(), x, y) {
              return Some(StockAction::Escape);
          }
 +        if self.tools_open() && contains(self.cpu_readout_bounds(), x, y) {
 +            return Some(StockAction::OpenSystemMonitor);
++        }
++        if self.battery_visible()
++            && contains(
++                self.native_control_bounds(BATTERY_LEFT, BATTERY_WIDTH),
++                x,
++                y,
++            )
++        {
++            return Some(StockAction::OpenPowerSettings);
 +        }
          self.normal_controls()
              .into_iter()
@@ -2905,6 +3134,9 @@ index 4c0ae87..2cd98b2 100644
 +            && let Some(bounds) = self.slider_bounds(control)
 +        {
 +            self.draw_slider(frame, control, bounds, levels)?;
++        }
++        if self.battery_visible() {
++            self.draw_battery(frame, levels)?;
 +        }
 +        if self.tools_open() {
 +            let bounds = self.cpu_readout_bounds();
@@ -3072,10 +3304,49 @@ index 4c0ae87..2cd98b2 100644
 +                height: diameter,
 +            };
 +            stock_art::draw_rounded_plate(frame, knob, diameter / 2, LABEL)?;
++        }
++        Ok(())
++    }
++
++    fn draw_battery(
++        self,
++        frame: &mut Xrgb8888Frame<'_>,
++        levels: StockLevels,
++    ) -> Result<(), StockSliceError> {
++        let Some(percentage) = levels.battery_percentage.map(|value| value.min(100)) else {
++            return Ok(());
++        };
++        if self
++            .native_control_bounds(BATTERY_LEFT, BATTERY_WIDTH)
++            .width
++            == 0
++        {
++            return Ok(());
          }
++        let color = battery_color(percentage);
++
++        // Deliberately avoid the grey control plate used by keyboard brightness:
++        // the battery should read as a status indicator, not as another button.
++        let shell = self.native_bounds(BATTERY_LEFT + 17, 10, 112, 40);
++        stock_art::draw_rounded_plate(frame, shell, self.scaled_y(7).max(1), color)?;
++        let terminal = self.native_bounds(BATTERY_LEFT + 129, 21, 7, 18);
++        stock_art::draw_rounded_plate(frame, terminal, self.scaled_y(3).max(1), color)?;
++
++        // The solid warning colour keeps the smaller black percentage readable
++        // at every level. The white bolt remains distinct while on external power.
++        let (label_left, label_width) = if levels.external_power {
++            let bolt = self.native_bounds(BATTERY_LEFT + 27, 18, 13, 24);
++            stock_art::draw_battery_bolt(frame, bolt, LABEL)?;
++            (43, 76)
++        } else {
++            (33, 80)
++        };
++        let label = self.native_bounds(BATTERY_LEFT + label_left, 18, label_width, 24);
++        stock_art::draw_battery_percentage(frame, label, percentage, BACKGROUND)?;
          Ok(())
      }
-@@ -415,20 +952,92 @@ impl StockBar {
+ 
+@@ -415,20 +1025,109 @@ impl StockBar {
      }
  
      fn normal_controls(self) -> Vec<LaidOutControl> {
@@ -3146,6 +3417,14 @@ index 4c0ae87..2cd98b2 100644
 +        })
 +    }
 +
++    fn battery_visible(self) -> bool {
++        !self.tools_open()
++            && self.open_slider().is_none()
++            && self.capabilities.contains(
++                StockCapabilities::EXTENDED_CONTROLS | StockCapabilities::DISPLAY_BRIGHTNESS,
++            )
++    }
++
 +    const fn slider_left(control: SliderControl) -> u32 {
 +        match control {
 +            SliderControl::DisplayBrightness => MAIN_SLIDER_LEFT,
@@ -3154,8 +3433,16 @@ index 4c0ae87..2cd98b2 100644
 +    }
 +
 +    fn slider_bounds(self, control: SliderControl) -> Option<Rectangle> {
-+        let bounds = self.native_control_bounds(Self::slider_left(control), SLIDER_WIDTH);
++        let bounds =
++            self.native_control_bounds(Self::slider_left(control), Self::slider_width(control));
 +        (self.active_slider() == Some(control) && bounds.width != 0).then_some(bounds)
++    }
++
++    const fn slider_width(control: SliderControl) -> u32 {
++        match control {
++            SliderControl::DisplayBrightness => MAIN_SLIDER_WIDTH,
++            SliderControl::KeyboardBacklight | SliderControl::Volume => PANEL_SLIDER_WIDTH,
++        }
 +    }
 +
 +    fn slider_track(self, control: SliderControl) -> Rectangle {
@@ -3165,7 +3452,8 @@ index 4c0ae87..2cd98b2 100644
 +            94
 +        };
 +        let track_left = Self::slider_left(control) + icon_inset;
-+        let mut bounds = self.native_control_bounds(track_left, SLIDER_WIDTH - icon_inset - 30);
++        let mut bounds =
++            self.native_control_bounds(track_left, Self::slider_width(control) - icon_inset - 30);
 +        let height = self.scaled_y(8).max(1);
 +        bounds.y += (bounds.height - height) / 2;
 +        bounds.height = height;
@@ -3175,7 +3463,7 @@ index 4c0ae87..2cd98b2 100644
      const fn control_available(self, control: Control) -> bool {
          match control {
              Control::DisplayDown | Control::DisplayUp => self
-@@ -443,18 +1052,41 @@ impl StockBar {
+@@ -443,18 +1142,41 @@ impl StockBar {
              Control::Mute | Control::VolumeDown | Control::VolumeUp => {
                  self.capabilities.contains(StockCapabilities::AUDIO)
              }
@@ -3222,7 +3510,24 @@ index 4c0ae87..2cd98b2 100644
      }
  
      fn scaled_x(self, value: u32) -> u32 {
-@@ -503,10 +1135,21 @@ const fn control_action(control: Control) -> StockAction {
+@@ -491,6 +1213,16 @@ fn contains(bounds: Rectangle, x: u32, y: u32) -> bool {
+         && y < bounds.y.saturating_add(bounds.height)
+ }
+ 
++const fn battery_color(percentage: u8) -> Rgb {
++    if percentage < 20 {
++        BATTERY_RED
++    } else if percentage < 50 {
++        BATTERY_ORANGE
++    } else {
++        BATTERY_GREEN
++    }
++}
++
+ const fn control_action(control: Control) -> StockAction {
+     match control {
+         Control::DisplayDown => StockAction::StepDisplayBrightness(StepDirection::Down),
+@@ -503,10 +1235,21 @@ const fn control_action(control: Control) -> StockAction {
          Control::Mute => StockAction::ToggleMute,
          Control::VolumeDown => StockAction::StepVolume(StepDirection::Down),
          Control::VolumeUp => StockAction::StepVolume(StepDirection::Up),
@@ -3245,7 +3550,7 @@ index 4c0ae87..2cd98b2 100644
      match control {
          Control::DisplayDown => Symbol::DisplayDown,
          Control::DisplayUp => Symbol::DisplayUp,
-@@ -515,9 +1158,22 @@ const fn control_symbol(control: Control) -> Symbol {
+@@ -515,9 +1258,22 @@ const fn control_symbol(control: Control) -> Symbol {
          Control::MediaPrevious => Symbol::Previous,
          Control::MediaPlayPause => Symbol::PlayPause,
          Control::MediaNext => Symbol::Next,
@@ -3268,7 +3573,7 @@ index 4c0ae87..2cd98b2 100644
      }
  }
  
-@@ -623,6 +1279,321 @@ mod tests {
+@@ -623,6 +1379,324 @@ mod tests {
          }
      }
  
@@ -3295,11 +3600,14 @@ index 4c0ae87..2cd98b2 100644
 +            Some((SliderControl::DisplayBrightness, 5))
 +        );
 +        assert_eq!(
-+            extended.slider_at(contact(873.0)),
++            extended.slider_at(contact(793.0)),
 +            Some((SliderControl::DisplayBrightness, 100))
 +        );
-+        assert_eq!(extended.slider_at(contact(874.0)), None);
-+        assert_eq!(extended.action_at(contact(850.0), false), None);
++        assert_eq!(extended.slider_at(contact(794.0)), None);
++        assert_eq!(
++            extended.action_at(contact(850.0), false),
++            Some(StockAction::OpenPowerSettings)
++        );
 +        assert_eq!(
 +            extended.action_at(contact(80.0), false),
 +            Some(StockAction::Escape)
@@ -3544,11 +3852,11 @@ index 4c0ae87..2cd98b2 100644
 +    #[test]
 +    fn lesson_label_shows_the_phase_and_a_zero_padded_countdown() {
 +        for (phase, remaining_seconds, expected_phase, expected_countdown) in [
-+            (LessonPhase::Class(3), Some(872), "CLASS 3", Some("14:32")),
-+            (LessonPhase::Break(1), Some(492), "BREAK", Some("08:12")),
++            (LessonPhase::Class(3), Some(872), "3. STD.", Some("14:32")),
++            (LessonPhase::Break(1), Some(492), "PAUSE", Some("08:12")),
 +            (LessonPhase::BeforeSchool, Some(130), "START", Some("02:10")),
-+            (LessonPhase::AfterSchool, None, "DONE", None),
-+            (LessonPhase::Free, None, "FREE", None),
++            (LessonPhase::AfterSchool, None, "ENDE", None),
++            (LessonPhase::Free, None, "FREI", None),
 +        ] {
 +            let (phase_label, countdown) = LessonStatus {
 +                phase,
@@ -3590,6 +3898,45 @@ index 4c0ae87..2cd98b2 100644
      #[test]
      fn media_capability_loss_keeps_fixed_chrome_but_disables_actions() {
          let full = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, all()).unwrap();
+@@ -698,4 +1772,38 @@ mod tests {
+         );
+         assert_eq!(pixels, before);
+     }
++
++    #[test]
++    fn battery_thresholds_are_red_orange_and_green() {
++        assert_eq!(battery_color(0), BATTERY_RED);
++        assert_eq!(battery_color(19), BATTERY_RED);
++        assert_eq!(battery_color(20), BATTERY_ORANGE);
++        assert_eq!(battery_color(49), BATTERY_ORANGE);
++        assert_eq!(battery_color(50), BATTERY_GREEN);
++        assert_eq!(battery_color(100), BATTERY_GREEN);
++    }
++
++    #[test]
++    fn battery_opens_power_settings_only_on_the_main_surface() {
++        let main = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap();
++        assert_eq!(
++            main.action_for_gesture(tap(870.0, 30.0), false),
++            Some(StockAction::OpenPowerSettings)
++        );
++        assert_ne!(
++            main.with_tools(true)
++                .action_for_gesture(tap(870.0, 30.0), false),
++            Some(StockAction::OpenPowerSettings)
++        );
++        assert_ne!(
++            main.with_open_slider(Some(SliderControl::KeyboardBacklight))
++                .action_for_gesture(tap(870.0, 30.0), false),
++            Some(StockAction::OpenPowerSettings)
++        );
++    }
+ }
 diff --git a/crates/t1-touchbar/src/totp_preview.rs b/crates/t1-touchbar/src/totp_preview.rs
 new file mode 100644
 index 0000000..7921272

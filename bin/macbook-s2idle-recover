@@ -1,0 +1,29 @@
+#!/bin/sh
+# Manual recovery after the isolated MacBookPro14,2 s2idle experiment.
+set -u
+
+bind_if_free()
+{
+    device=$1
+    driver=$2
+    [ -e "/sys/bus/pci/devices/$device" ] || return 0
+    [ -L "/sys/bus/pci/devices/$device/driver" ] && return 0
+    printf '%s' "$device" > "/sys/bus/pci/drivers/$driver/bind"
+}
+
+modprobe thunderbolt || true
+modprobe xhci_pci || true
+modprobe brcmfmac || true
+bind_if_free 0000:05:00.0 thunderbolt || true
+bind_if_free 0000:7b:00.0 thunderbolt || true
+sleep 1
+bind_if_free 0000:06:00.0 xhci_hcd || true
+bind_if_free 0000:7c:00.0 xhci_hcd || true
+bind_if_free 0000:02:00.0 brcmfmac || true
+udevadm settle --timeout=15 || true
+systemctl --no-block try-restart NetworkManager.service || true
+systemctl --no-block start t1-touchbar-hw.socket || true
+if [ -r /run/macbook-s2idle-powersave/kbd-backlight ] && [ -w /sys/class/leds/spi::kbd_backlight/brightness ]; then
+    cat /run/macbook-s2idle-powersave/kbd-backlight > /sys/class/leds/spi::kbd_backlight/brightness
+fi
+exit 0

@@ -1,0 +1,8 @@
+# MacBookPro14,2: the applespi keyboard reports vendor/product 0000:0000.
+# libinput's stock Apple SPI rule expects vendor 05ac, so disable-while-
+# typing cannot reliably associate the built-in keyboard with the touchpad.
+[MacBookPro14,2 Apple SPI internal keyboard]
+MatchName=Apple SPI Keyboard
+MatchUdevType=keyboard
+MatchBus=spi
+AttrKeyboardIntegration=internal
