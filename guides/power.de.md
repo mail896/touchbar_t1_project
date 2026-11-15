@@ -6,22 +6,18 @@ allgemeine MacBook-Konfiguration gedacht.
 
 ## s2idle-Energiesparen
 
-Der Hook nutzt ausschließlich `s2idle`. Vor dem Schlafen schaltet er die
-Tastaturbeleuchtung aus, parkt WLAN sowie unbenutzte externe
-USB-/Thunderbolt-Controller und stellt sie nach dem Aufwachen wieder her. Der
-interne T1-/iBridge-Pfad für Touch Bar und Touch ID bleibt aktiv.
+Der Hook gilt für `s2idle`. Mit `MODE=wifi` schaltet er beim Einschlafen die
+Tastaturbeleuchtung aus und koppelt WLAN vorübergehend ab. Nach dem
+Aufwachen stellt er beides wieder her. Die USB-C- und Thunderbolt-Treiber
+bleiben eingebunden, sodass ihre Controller in D3hot wechseln können.
+Der interne T1-/iBridge-Pfad für Touch Bar und Touch ID bleibt verfügbar.
 
-Ist an einem der verwalteten Controller ein externes USB-Gerät angeschlossen,
-werden die Controller nicht geparkt. Dadurch bleibt das Gerät zuverlässig
-erreichbar, die Einsparung fällt aber kleiner aus. WLAN wird unabhängig davon
-wiederhergestellt.
-
-Auf dem geprüften Gerät sank die Leistungsaufnahme im Schlaf gegenüber dem
-ursprünglichen Zustand deutlich. Der genaue Wert hängt von angeschlossenen
-Geräten, Funkverkehr und Akkuzustand ab. Die Hardware meldet unter Linux kein
-brauchbares S0ix und bleibt beim Prozessorpaket in C3; S3/deep und Hibernation
-waren nicht stabil und sind deshalb ausdrücklich nicht Bestandteil dieser
-Konfiguration.
+Auf einem MacBookPro14,2 lag die gemessene Leistungsaufnahme im Akkubetrieb
+mit eingebundenen Treibern in zwei Vergleichen niedriger (1,85 gegenüber
+2,06 W und 4,17 gegenüber 4,80 W). Das sind Messwerte eines Geräts bei
+unterschiedlich langen Läufen. Die CPU blieb in den Tests bei Package C3,
+und der S0ix-Zähler blieb bei null. S3/deep und Hibernation waren auf dem
+Testgerät beim Aufwachen unzuverlässig.
 
 Installation:
 

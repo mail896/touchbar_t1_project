@@ -6,20 +6,17 @@ MacBook configuration.
 
 ## s2idle power saving
 
-The hook only handles `s2idle`. Before sleep it turns off the keyboard
-backlight and parks Wi-Fi plus unused external USB/Thunderbolt controllers. It
-restores them after resume. The internal T1/iBridge path used by Touch Bar and
-Touch ID remains active.
+The hook applies to `s2idle`. With `MODE=wifi`, it turns off the keyboard
+backlight and temporarily unbinds Wi-Fi before sleep. It restores both on
+resume. The USB-C and Thunderbolt drivers stay bound, so their controllers
+can enter D3hot. The internal T1/iBridge path for Touch Bar and Touch ID
+remains available.
 
-If an external USB device is attached to a managed controller, controller
-parking is skipped. This keeps the device reliable at the cost of some power
-savings. Wi-Fi restoration still runs.
-
-On the tested machine, sleep power consumption dropped significantly compared
-with the original configuration. Exact results depend on attached devices,
-radio traffic and battery condition. The hardware does not expose usable S0ix
-under Linux and the CPU package remains in C3. S3/deep sleep and hibernation
-were not reliable and are deliberately excluded from this setup.
+On one MacBookPro14,2, battery tests with the drivers bound measured lower
+sleep power in both comparisons (1.85 vs. 2.06 W and 4.17 vs. 4.80 W).
+The runs varied in length. The CPU package stayed at C3 and the S0ix counter
+stayed at zero. S3/deep sleep and hibernation were unreliable on resume on
+the test machine.
 
 Install the files:
 
