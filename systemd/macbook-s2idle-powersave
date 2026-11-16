@@ -94,8 +94,19 @@ def enable():
         if not router.name.endswith("-0") and (router / "authorized").is_file():
             raise RuntimeError("An external Thunderbolt router is present")
     for connector in Path("/sys/class/drm").glob("card*-*/status"):
-        if "-eDP-" not in connector.parent.name and connector.read_text().strip() == "connected":
-            raise RuntimeError("An external display is connected")
+        if "-eDP-" in connector.parent.name or connector.read_text().strip() != "connected":
+            continue
+        # The internal T1 Touch Bar also advertises a connected DRM output.
+        if "-USB-" in connector.parent.name:
+            card = connector.parent.name.split("-", 1)[0]
+            interface = (Path("/sys/class/drm") / card / "device").resolve()
+            usb = interface.parent
+            if ((interface / "driver").resolve().name == "appletbdrm"
+                    and (pci / "0000:00:14.0").resolve() in usb.parents
+                    and (usb / "idVendor").read_text().strip() == "05ac"
+                    and (usb / "idProduct").read_text().strip() == "8600"):
+                continue
+        raise RuntimeError("An external display is connected")
     with ExitStack() as stack:
         opened = {}
         original = {}
