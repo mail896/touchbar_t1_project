@@ -15,6 +15,122 @@ log()
     logger -t "$tag" -- "$*"
 }
 
+thunderbolt_l1()
+{
+    /usr/bin/python3 -I - "$1" "$state/thunderbolt-l1.json" <<'PY'
+from contextlib import ExitStack
+import json
+import os
+from pathlib import Path
+import sys
+
+devices = {
+    "0000:00:1c.4": (0x9d14, 0x40), "0000:03:00.0": (0x1578, 0xc0),
+    "0000:00:1d.0": (0x9d18, 0x40), "0000:79:00.0": (0x1578, 0xc0),
+}
+drivers = {
+    "0000:05:00.0": "thunderbolt", "0000:06:00.0": "xhci_hcd",
+    "0000:7b:00.0": "thunderbolt", "0000:7c:00.0": "xhci_hcd",
+}
+pci = Path("/sys/bus/pci/devices")
+action, journal_path = sys.argv[1:]
+journal = Path(journal_path)
+mask = 0x0002
+
+
+def read_config(fd, offset, size):
+    data = os.pread(fd, size, offset)
+    if len(data) != size or data == b"\xff" * size:
+        raise OSError(f"PCIe config unreadable at {offset:#x}")
+    return int.from_bytes(data, "little")
+
+
+def open_port(address, stack):
+    device, cap = devices[address]
+    fd = os.open(pci / address / "config", os.O_RDWR)
+    stack.callback(os.close, fd)
+    if (read_config(fd, 0, 4) != (device << 16 | 0x8086)
+            or read_config(fd, cap, 1) != 0x10):
+        raise RuntimeError(f"Unexpected PCI identity at {address}")
+    return fd, cap
+
+
+def set_l1(fd, cap, value):
+    offset = cap + 0x10
+    current = read_config(fd, offset, 2)
+    target = (current & ~mask) | (value & mask)
+    if target != current:
+        if os.pwrite(fd, target.to_bytes(2, "little"), offset) != 2:
+            raise OSError("Short Link Control write")
+    if read_config(fd, offset, 2) != target:
+        raise OSError("Link Control verification failed")
+
+
+def restore():
+    original = json.loads(journal.read_text())
+    if set(original) != set(devices) or any(
+            type(value) is not int or not 0 <= value <= 0xffff for value in original.values()):
+        raise RuntimeError("Invalid Thunderbolt Link Control journal")
+    errors = []
+    for address in reversed(devices):
+        try:
+            with ExitStack() as stack:
+                set_l1(*open_port(address, stack), original[address])
+        except (OSError, RuntimeError) as exc:
+            errors.append(f"{address}: {exc}")
+    if errors:
+        raise RuntimeError(", ".join(errors))
+    journal.unlink()
+
+
+def enable():
+    for address, driver in drivers.items():
+        if (pci / address / "driver").resolve().name != driver:
+            raise RuntimeError(f"Expected {driver} at {address}")
+    for root, bridge in (("0000:00:1c.4", "0000:03:00.0"), ("0000:00:1d.0", "0000:79:00.0")):
+        if (pci / bridge).resolve().parent != (pci / root).resolve():
+            raise RuntimeError(f"Unexpected Thunderbolt topology at {root}")
+    for router in Path("/sys/bus/thunderbolt/devices").glob("*"):
+        if not router.name.endswith("-0") and (router / "authorized").is_file():
+            raise RuntimeError("An external Thunderbolt router is present")
+    for connector in Path("/sys/class/drm").glob("card*-*/status"):
+        if "-eDP-" not in connector.parent.name and connector.read_text().strip() == "connected":
+            raise RuntimeError("An external display is connected")
+    with ExitStack() as stack:
+        opened = {}
+        original = {}
+        for address in devices:
+            port = pci / address
+            if ((port / "d3cold_allowed").read_text().strip() != "0"
+                    or (port / "power_state").read_text().strip() != "D0"
+                    or (port / "power/control").read_text().strip() != "on"):
+                raise RuntimeError(f"Unexpected PCI power configuration at {address}")
+            fd, cap = opened[address] = open_port(address, stack)
+            control = original[address] = read_config(fd, cap + 0x10, 2)
+            if (control & 0x13) or not (read_config(fd, cap + 0x0c, 4) & 0x800):
+                raise RuntimeError(f"Unexpected PCIe Link Control or capability at {address}")
+        temp = journal.with_suffix(".tmp")
+        temp.write_text(json.dumps(original))
+        temp.replace(journal)
+        try:
+            # Enable root before bridge, restore in the opposite order.
+            for fd, cap in opened.values():
+                set_l1(fd, cap, mask)
+        except (OSError, RuntimeError):
+            restore()
+            raise
+
+
+try:
+    if action == "pre":
+        enable()
+    else:
+        restore()
+except (OSError, RuntimeError, ValueError) as exc:
+    sys.exit(str(exc))
+PY
+}
+
 snapshot()
 {
     name=$1
@@ -93,6 +209,16 @@ external_usb_on_managed_controllers()
 
 [ -r /sys/class/dmi/id/product_name ] || exit 0
 [ "$(cat /sys/class/dmi/id/product_name)" = MacBookPro14,2 ] || exit 0
+# Retry an interrupted rollback before an old state directory can be removed,
+# and restore on resume even if the hook was disabled while suspended.
+if [ -f "$state/thunderbolt-l1.json" ]; then
+    if detail=$(thunderbolt_l1 post 2>&1); then
+        log "Thunderbolt L1 Link Control restored"
+    else
+        log "Thunderbolt L1 restore failed: $detail"
+        [ "${1:-}" != pre ] || exit 0
+    fi
+fi
 [ -e "$disabled" ] && exit 0
 [ -r "$config" ] || exit 0
 
@@ -115,6 +241,14 @@ case ${1:-} in
         mkdir -p "$state"
         snapshot pre
         log "pre-s2idle power save begins (mode=$mode)"
+
+        if [ "$mode" = wifi ] && [ "${THUNDERBOLT_L1:-0}" = 1 ]; then
+            if detail=$(thunderbolt_l1 pre 2>&1); then
+                log "Thunderbolt L1 enabled on both links"
+            else
+                log "Thunderbolt L1 skipped or rolled back: $detail"
+            fi
+        fi
 
         # PowerDevil did not consistently blank this LED in s2idle. Preserve
         # the user's value and force it off for the complete sleep interval.

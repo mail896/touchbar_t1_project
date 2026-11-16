@@ -18,6 +18,13 @@ The runs varied in length. The CPU package stayed at C3 and the S0ix counter
 stayed at zero. S3/deep sleep and hibernation were unreliable on resume on
 the test machine.
 
+With `THUNDERBOLT_L1=1`, the hook enables ASPM L1 on both internal
+Thunderbolt links and restores the original Link Control settings after
+resume. It skips the change when an external Thunderbolt router or display
+is connected. A USB-C drive remained readable after resume on both branches.
+The two-hour battery test averaged 2.93 W and logged 96.1% package C10.
+Set `THUNDERBOLT_L1=0` to disable L1 independently.
+
 Install the files:
 
 ```bash

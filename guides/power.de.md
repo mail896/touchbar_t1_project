@@ -19,6 +19,13 @@ unterschiedlich langen Läufen. Die CPU blieb in den Tests bei Package C3,
 und der S0ix-Zähler blieb bei null. S3/deep und Hibernation waren auf dem
 Testgerät beim Aufwachen unzuverlässig.
 
+Mit `THUNDERBOLT_L1=1` aktiviert der Hook ASPM L1 auf beiden internen
+Thunderbolt-Links und stellt die vorherigen Link-Control-Werte nach
+dem Aufwachen wieder her. Bei externem Thunderbolt-Router oder Display
+überspringt er die Änderung. Ein USB-C-Stick blieb an beiden Zweigen
+nach dem Aufwachen lesbar. Der zweistündige Akkutest ergab 2,93 W
+und 96,1 % Package C10. Mit `THUNDERBOLT_L1=0` lässt sich L1 separat abschalten.
+
 Installation:
 
 ```bash
