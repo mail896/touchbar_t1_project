@@ -269,13 +269,16 @@ case ${1:-} in
             log "keyboard backlight forced off"
         fi
 
-        # This custom driver intentionally keeps Wi-Fi in D0 for normal
-        # suspend reliability. In wifi/full mode, remove it completely and
-        # recreate it after resume. Controller-only mode keeps Wi-Fi as the
-        # recovery connection.
+        # Keep the driver bound for firmware suspend only with its D0
+        # protection enabled. Preserve the previous fallback and full mode.
         case "$mode" in
             wifi|full)
-                unbind_if_bound 0000:02:00.0 brcmfmac
+                if [ "$mode" = wifi ] && [ "${WIFI_KEEP_BOUND:-0}" = 1 ] &&
+                    [ "$(cat /sys/module/brcmfmac/parameters/mbp142_s2idle_keep_d0 2>/dev/null)" = Y ]; then
+                    log "WLAN stays bound for firmware suspend with D0 protection"
+                else
+                    unbind_if_bound 0000:02:00.0 brcmfmac
+                fi
                 ;;
         esac
 

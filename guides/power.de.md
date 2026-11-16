@@ -6,11 +6,15 @@ allgemeine MacBook-Konfiguration gedacht.
 
 ## s2idle-Energiesparen
 
-Der Hook gilt für `s2idle`. Mit `MODE=wifi` schaltet er beim Einschlafen die
-Tastaturbeleuchtung aus und koppelt WLAN vorübergehend ab. Nach dem
-Aufwachen stellt er beides wieder her. Die USB-C- und Thunderbolt-Treiber
-bleiben eingebunden, sodass ihre Controller in D3hot wechseln können.
-Der interne T1-/iBridge-Pfad für Touch Bar und Touch ID bleibt verfügbar.
+Der Hook gilt für `s2idle`. Er schaltet beim Einschlafen die
+Tastaturbeleuchtung aus und stellt sie nach dem Aufwachen wieder her.
+Mit `MODE=wifi` und `WIFI_KEEP_BOUND=1` bleibt der WLAN-Treiber eingebunden,
+wenn `brcmfmac` mit aktivem `mbp142_s2idle_keep_d0` läuft. Die Firmware kann
+dann schlafen, während das PCI-Gerät in D0 bleibt. Ohne diese Option oder
+ohne aktiven D0-Schutz koppelt der Hook WLAN vorübergehend ab und bindet
+es nach dem Aufwachen wieder ein. Im WLAN-Modus bleiben die USB-C- und
+Thunderbolt-Treiber eingebunden, sodass ihre Controller in D3hot wechseln
+können. Der interne T1-/iBridge-Pfad für Touch Bar und Touch ID bleibt verfügbar.
 
 Auf einem MacBookPro14,2 lag die gemessene Leistungsaufnahme im Akkubetrieb
 mit eingebundenen Treibern in zwei Vergleichen niedriger (1,85 gegenüber

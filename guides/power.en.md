@@ -6,11 +6,14 @@ MacBook configuration.
 
 ## s2idle power saving
 
-The hook applies to `s2idle`. With `MODE=wifi`, it turns off the keyboard
-backlight and temporarily unbinds Wi-Fi before sleep. It restores both on
-resume. The USB-C and Thunderbolt drivers stay bound, so their controllers
-can enter D3hot. The internal T1/iBridge path for Touch Bar and Touch ID
-remains available.
+The hook applies to `s2idle`. It turns off the keyboard backlight before
+sleep and restores it on resume. With `MODE=wifi` and `WIFI_KEEP_BOUND=1`,
+the Wi-Fi driver stays bound if `brcmfmac` has `mbp142_s2idle_keep_d0` enabled.
+The firmware can then sleep while the PCI device stays in D0. If the option
+or D0 protection is disabled, the hook unbinds Wi-Fi before sleep and
+rebinds it on resume. In Wi-Fi mode the USB-C and Thunderbolt drivers stay
+bound, so their controllers can enter D3hot. The internal T1/iBridge path
+for Touch Bar and Touch ID remains available.
 
 On one MacBookPro14,2, battery tests with the drivers bound measured lower
 sleep power in both comparisons (1.85 vs. 2.06 W and 4.17 vs. 4.80 W).
