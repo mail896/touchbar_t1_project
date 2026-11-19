@@ -17,6 +17,32 @@ volume_state() {
         END { if (!found) exit 1 }'
 }
 
+battery_status() {
+    plugged=0
+    for online_path in /sys/class/power_supply/*/online; do
+        [ -r "$online_path" ] || continue
+        IFS= read -r online < "$online_path" || continue
+        if [ "$online" = 1 ]; then
+            plugged=1
+            break
+        fi
+    done
+
+    value='-'
+    if [ "${display:-}" != 0 ] &&
+       property=$(/usr/bin/busctl --system --timeout=0.2s --json=short get-property \
+           org.freedesktop.UPower /org/freedesktop/UPower/devices/DisplayDevice \
+           org.freedesktop.UPower.Device Percentage 2>/dev/null); then
+        case "$property" in
+            '{"type":"d","data":'*'}')
+                value=${property#'{"type":"d","data":'}
+                value=${value%'}'}
+                ;;
+        esac
+    fi
+    printf '%s %s\n' "$value" "$plugged"
+}
+
 osd() {
     /usr/bin/qdbus6 org.kde.plasmashell /org/kde/osdService \
         "org.kde.osdService.$1" "$2" >/dev/null
@@ -62,7 +88,7 @@ show_brightness() {
 
 [ "${1:-}" = v1 ] || exit 2
 case "${2:-}" in
-    status)
+    status|status-with-battery)
         capabilities=8
         if [ -x /usr/bin/playerctl ] &&
            players=$(/usr/bin/playerctl --list-all 2>/dev/null) &&
@@ -73,6 +99,9 @@ case "${2:-}" in
             printf 'T1BRIDGE-DESKTOP 1 %s %s\n' "$((capabilities | 1))" "$state"
         else
             printf 'T1BRIDGE-DESKTOP 1 %s - -\n' "$capabilities"
+        fi
+        if [ "$2" = status-with-battery ]; then
+            battery_status
         fi
         ;;
     set-volume|set-volume-preview)

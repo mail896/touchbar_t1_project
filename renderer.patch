@@ -211,7 +211,7 @@ index 0000000..7ac09e2
 +    ExitCode::from(2)
 +}
 diff --git a/crates/t1-touchbar/src/builtin_renderer.rs b/crates/t1-touchbar/src/builtin_renderer.rs
-index 90cead9..7c5b2dd 100644
+index 90cead9..2d04c01 100644
 --- a/crates/t1-touchbar/src/builtin_renderer.rs
 +++ b/crates/t1-touchbar/src/builtin_renderer.rs
 @@ -1,30 +1,39 @@
@@ -369,7 +369,7 @@ index 90cead9..7c5b2dd 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -339,6 +401,15 @@ struct RendererSession {
+@@ -339,6 +401,16 @@ struct RendererSession {
      pending_desktop_state: Option<DesktopState>,
      display_off: bool,
      levels: StockLevels,
@@ -381,11 +381,12 @@ index 90cead9..7c5b2dd 100644
 +    totp_display_deadline: Option<Duration>,
 +    next_cpu_metrics_read: Duration,
 +    next_battery_read: Duration,
++    use_desktop_battery: bool,
 +    core_usage: Option<CoreUsage>,
      touch_id: TouchIdOverlay,
      overlay_state: Option<OverlayState>,
      overlay_visual_state: Option<OverlayState>,
-@@ -390,6 +461,15 @@ impl RendererSession {
+@@ -390,6 +462,16 @@ impl RendererSession {
              pending_desktop_state: None,
              display_off: false,
              levels: StockLevels::default(),
@@ -397,11 +398,12 @@ index 90cead9..7c5b2dd 100644
 +            totp_display_deadline: None,
 +            next_cpu_metrics_read: Duration::ZERO,
 +            next_battery_read: Duration::ZERO,
++            use_desktop_battery: false,
 +            core_usage: None,
              touch_id,
              overlay_state: None,
              overlay_visual_state: None,
-@@ -463,6 +543,13 @@ impl RendererSession {
+@@ -463,6 +545,13 @@ impl RendererSession {
                  if !in_flight.acknowledged || release.frame_id != in_flight.frame_id {
                      return Err(BuiltinRendererError::Protocol);
                  }
@@ -415,7 +417,7 @@ index 90cead9..7c5b2dd 100644
                  self.in_flight = None;
                  self.submit_if_ready(connection)
              }
-@@ -472,6 +559,19 @@ impl RendererSession {
+@@ -472,6 +561,19 @@ impl RendererSession {
                  }
                  let outcome = self.observe_input(frame)?;
                  self.dirty |= outcome.redraw;
@@ -435,7 +437,7 @@ index 90cead9..7c5b2dd 100644
                  for action in outcome.actions {
                      self.dispatch(action, connection, provider)?;
                  }
-@@ -525,6 +625,17 @@ impl RendererSession {
+@@ -525,6 +627,17 @@ impl RendererSession {
                  ));
                  Ok(())
              }
@@ -453,7 +455,7 @@ index 90cead9..7c5b2dd 100644
              PendingRequest::TapKeys => Ok(()),
              PendingRequest::Register => Err(BuiltinRendererError::Protocol),
          }
-@@ -551,6 +662,7 @@ impl RendererSession {
+@@ -551,6 +664,7 @@ impl RendererSession {
          match pending {
              PendingRequest::TapKeys
              | PendingRequest::CancelTouchId
@@ -461,7 +463,7 @@ index 90cead9..7c5b2dd 100644
              | PendingRequest::HardwareAction(_) => {
                  eprintln!("t1-touchbar: typed action was rejected");
                  Ok(())
-@@ -572,6 +684,11 @@ impl RendererSession {
+@@ -572,6 +686,11 @@ impl RendererSession {
          &mut self,
          mut frame: WireInputFrame,
      ) -> Result<InputOutcome, BuiltinRendererError> {
@@ -473,7 +475,7 @@ index 90cead9..7c5b2dd 100644
          if self.display_off || self.input.wait_for_touch_release {
              self.input.wait_for_touch_release = frame.contacts.iter().any(|contact| contact.tip);
              frame.contacts.clear();
-@@ -635,31 +752,18 @@ impl RendererSession {
+@@ -635,31 +754,18 @@ impl RendererSession {
              return self.send_keys(&[key], connection);
          }
          match action {
@@ -516,7 +518,7 @@ index 90cead9..7c5b2dd 100644
                  self.levels.muted = !self.levels.muted;
                  self.dirty = true;
                  dispatch_desktop(provider, DesktopAction::ToggleMute);
-@@ -688,10 +792,88 @@ impl RendererSession {
+@@ -688,10 +794,88 @@ impl RendererSession {
                  dispatch_desktop(provider, DesktopAction::MediaNext);
                  Ok(())
              }
@@ -605,7 +607,7 @@ index 90cead9..7c5b2dd 100644
      fn send_hardware_action(
          &mut self,
          action: ClientMessage,
-@@ -789,6 +971,9 @@ impl RendererSession {
+@@ -789,6 +973,9 @@ impl RendererSession {
      }
  
      fn set_overlay(&mut self, state: Option<OverlayState>, progress: Option<u8>) {
@@ -615,7 +617,7 @@ index 90cead9..7c5b2dd 100644
          if self.overlay_state == state && self.enrollment_progress == progress {
              return;
          }
-@@ -832,6 +1017,46 @@ impl RendererSession {
+@@ -832,6 +1019,43 @@ impl RendererSession {
          self.now = now;
          self.advance_overlay_fade(now);
          self.advance_enrollment_progress(now);
@@ -642,13 +644,10 @@ index 90cead9..7c5b2dd 100644
 +            self.levels.cpu_temperature = temperature;
 +            self.levels.cpu_cores = cores;
 +        }
-+        if !self.display_off && now >= self.next_battery_read {
++        if !self.use_desktop_battery && !self.display_off && now >= self.next_battery_read {
 +            self.next_battery_read = now + BATTERY_INTERVAL;
 +            let (percentage, external_power) = read_power_status();
-+            self.dirty |= self.levels.battery_percentage != percentage
-+                || self.levels.external_power != external_power;
-+            self.levels.battery_percentage = percentage;
-+            self.levels.external_power = external_power;
++            self.set_battery_status(percentage, external_power);
 +        }
 +        if self
 +            .hardware_capabilities
@@ -662,7 +661,7 @@ index 90cead9..7c5b2dd 100644
          if !self.display_off
              && !self.input.wait_for_touch_release
              && let Some(action) = self.input.take_repeat(now)
-@@ -841,6 +1066,173 @@ impl RendererSession {
+@@ -841,6 +1065,173 @@ impl RendererSession {
          self.submit_if_ready(connection)
      }
  
@@ -836,7 +835,25 @@ index 90cead9..7c5b2dd 100644
      fn advance_overlay_fade(&mut self, now: Duration) {
          if self.overlay_opacity == self.overlay_target_opacity {
              return;
-@@ -894,16 +1286,15 @@ impl RendererSession {
+@@ -888,22 +1279,32 @@ impl RendererSession {
+         self.dirty = true;
+     }
+ 
+-    fn set_desktop_state(&mut self, state: DesktopState) -> Result<(), BuiltinRendererError> {
++    fn set_battery_status(&mut self, percentage: Option<u8>, external_power: bool) {
++        self.dirty |= self.levels.battery_percentage != percentage
++            || self.levels.external_power != external_power;
++        self.levels.battery_percentage = percentage;
++        self.levels.external_power = external_power;
++    }
++
++    fn set_desktop_state(&mut self, mut state: DesktopState) -> Result<(), BuiltinRendererError> {
++        if let Some(battery) = state.battery.take() {
++            self.use_desktop_battery = true;
++            self.set_battery_status(battery.percentage, battery.external_power);
++        }
+         // Display power follows the desktop immediately, even under an active
+         // touch: a dark panel must not keep showing controls.
          if self.display_off != state.display_off {
              self.display_off = state.display_off;
              if self.display_off {
@@ -857,7 +874,7 @@ index 90cead9..7c5b2dd 100644
              return Ok(());
          }
          if !self.input.is_idle() {
-@@ -930,17 +1321,36 @@ impl RendererSession {
+@@ -930,17 +1331,36 @@ impl RendererSession {
              self.dimensions.height(),
              capabilities,
          )
@@ -897,7 +914,7 @@ index 90cead9..7c5b2dd 100644
      fn allocate_request(&mut self, kind: PendingRequest) -> Result<u32, BuiltinRendererError> {
          if self.pending.len() >= MAX_PENDING_REQUESTS {
              return Err(BuiltinRendererError::Protocol);
-@@ -960,6 +1370,188 @@ impl RendererSession {
+@@ -960,6 +1380,188 @@ impl RendererSession {
      }
  }
  
@@ -1086,7 +1103,7 @@ index 90cead9..7c5b2dd 100644
  const fn wire_step(direction: StepDirection) -> WireStepDirection {
      match direction {
          StepDirection::Down => WireStepDirection::Down,
-@@ -1007,6 +1599,8 @@ struct InputOutcome {
+@@ -1007,6 +1609,8 @@ struct InputOutcome {
      redraw: bool,
      actions: Vec<StockAction>,
      cancel_touch_id: bool,
@@ -1095,7 +1112,7 @@ index 90cead9..7c5b2dd 100644
  }
  
  struct InputInterpreter {
-@@ -1018,6 +1612,7 @@ struct InputInterpreter {
+@@ -1018,6 +1622,7 @@ struct InputInterpreter {
      pressed: Option<StockAction>,
      repeat: Option<RepeatState>,
      suppress_tap: Option<StockAction>,
@@ -1103,7 +1120,7 @@ index 90cead9..7c5b2dd 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -1042,6 +1637,7 @@ impl InputInterpreter {
+@@ -1042,6 +1647,7 @@ impl InputInterpreter {
              pressed: None,
              repeat: None,
              suppress_tap: None,
@@ -1111,7 +1128,7 @@ index 90cead9..7c5b2dd 100644
          })
      }
  
-@@ -1053,6 +1649,10 @@ impl InputInterpreter {
+@@ -1053,6 +1659,10 @@ impl InputInterpreter {
          self.pressed
      }
  
@@ -1122,7 +1139,7 @@ index 90cead9..7c5b2dd 100644
      fn is_idle(&self) -> bool {
          !self.wait_for_touch_release && self.gestures.is_idle()
      }
-@@ -1092,9 +1692,10 @@ impl InputInterpreter {
+@@ -1092,9 +1702,10 @@ impl InputInterpreter {
          let pressed = contacts
              .first()
              .filter(|contact| {
@@ -1136,7 +1153,7 @@ index 90cead9..7c5b2dd 100644
              })
              .and_then(|contact| self.stock.action_at(*contact, self.fn_pressed));
          redraw |= self.pressed != pressed;
-@@ -1118,9 +1719,60 @@ impl InputInterpreter {
+@@ -1118,9 +1729,60 @@ impl InputInterpreter {
              .gestures
              .ingest_frame(Duration::from_nanos(frame.monotonic_ns), &contacts)
              .map_err(|_| BuiltinRendererError::Gesture)?;
@@ -1197,7 +1214,7 @@ index 90cead9..7c5b2dd 100644
              if matches!(
                  gesture,
                  crate::gesture::Gesture::DragStart(_) | crate::gesture::Gesture::Drag { .. }
-@@ -1161,11 +1813,13 @@ impl InputInterpreter {
+@@ -1161,11 +1823,13 @@ impl InputInterpreter {
                  actions.push(action);
              }
          }
@@ -1213,7 +1230,7 @@ index 90cead9..7c5b2dd 100644
      }
  
      fn take_repeat(&mut self, now: Duration) -> Option<StockAction> {
-@@ -1187,6 +1841,7 @@ impl InputInterpreter {
+@@ -1187,6 +1851,7 @@ impl InputInterpreter {
          self.wait_for_touch_release |= !self.gestures.is_idle();
          self.gestures.cancel_all();
          self.pressed = None;
@@ -1221,7 +1238,7 @@ index 90cead9..7c5b2dd 100644
          self.cancel_repeat();
      }
  }
-@@ -1230,7 +1885,18 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
+@@ -1230,7 +1895,18 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
          | StockAction::StepVolume(_)
          | StockAction::MediaPrevious
          | StockAction::MediaPlayPause
@@ -1241,7 +1258,31 @@ index 90cead9..7c5b2dd 100644
      })
  }
  
-@@ -1842,6 +2508,8 @@ mod tests {
+@@ -1411,6 +2087,7 @@ mod tests {
+             volume: Some(61),
+             muted: true,
+             display_off: false,
++            battery: None,
+         };
+         session
+             .set_desktop_state(state)
+@@ -1454,6 +2131,7 @@ mod tests {
+             volume: Some(42),
+             muted: false,
+             display_off: false,
++            battery: None,
+         };
+         session
+             .set_desktop_state(state)
+@@ -1484,6 +2162,7 @@ mod tests {
+             volume: Some(50),
+             muted: false,
+             display_off: false,
++            battery: None,
+         };
+         session
+             .set_desktop_state(state)
+@@ -1842,6 +2521,8 @@ mod tests {
                  redraw: true,
                  actions: Vec::new(),
                  cancel_touch_id: false,
@@ -1250,7 +1291,7 @@ index 90cead9..7c5b2dd 100644
              }
          );
          assert!(interpreter.fn_pressed());
-@@ -1861,6 +2529,146 @@ mod tests {
+@@ -1861,6 +2542,146 @@ mod tests {
          );
      }
  
@@ -1397,7 +1438,7 @@ index 90cead9..7c5b2dd 100644
      #[test]
      fn escape_remains_active_without_fn_and_function_regions_do_not() {
          let mut interpreter = new_interpreter();
-@@ -2095,6 +2903,14 @@ mod tests {
+@@ -2095,6 +2916,14 @@ mod tests {
          assert_eq!(ids.next(&pending), Ok(2));
      }
  
@@ -1412,6 +1453,26 @@ index 90cead9..7c5b2dd 100644
      #[test]
      fn every_stock_action_has_the_exact_wire_key() {
          let expected = [
+diff --git a/crates/t1-touchbar/src/builtin_renderer/tests/display_power.rs b/crates/t1-touchbar/src/builtin_renderer/tests/display_power.rs
+index ea0757c..77d4e7a 100644
+--- a/crates/t1-touchbar/src/builtin_renderer/tests/display_power.rs
++++ b/crates/t1-touchbar/src/builtin_renderer/tests/display_power.rs
+@@ -12,6 +12,7 @@ fn display_off_blanks_the_frame_and_drops_contacts_until_power_returns() {
+         volume: None,
+         muted: false,
+         display_off: true,
++        battery: None,
+     };
+     session.set_desktop_state(off).expect("apply display off");
+     assert!(session.display_off);
+@@ -58,6 +59,7 @@ fn display_power_applies_under_an_active_touch_while_layout_waits() {
+         volume: Some(50),
+         muted: false,
+         display_off: true,
++        battery: None,
+     };
+     session
+         .set_desktop_state(state)
 diff --git a/crates/t1-touchbar/src/cpu_usage.rs b/crates/t1-touchbar/src/cpu_usage.rs
 new file mode 100644
 index 0000000..eba7759
@@ -1520,7 +1581,7 @@ index 0000000..eba7759
 +    }
 +}
 diff --git a/crates/t1-touchbar/src/desktop_provider.rs b/crates/t1-touchbar/src/desktop_provider.rs
-index 315fce7..543abbd 100644
+index 315fce7..47b8730 100644
 --- a/crates/t1-touchbar/src/desktop_provider.rs
 +++ b/crates/t1-touchbar/src/desktop_provider.rs
 @@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
@@ -1538,7 +1599,19 @@ index 315fce7..543abbd 100644
  pub const PROVIDER_ENVIRONMENT: &str = "T1BRIDGE_DESKTOP_PROVIDER";
  
  const STATUS_MAGIC: &str = "T1BRIDGE-DESKTOP";
-@@ -69,7 +71,9 @@ pub struct DesktopState {
+@@ -64,12 +66,21 @@ pub struct DesktopState {
+     /// True only while a provider advertising display power reports the
+     /// desktop display off. An absent or failed provider never blanks.
+     pub display_off: bool,
++    pub battery: Option<DesktopBattery>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct DesktopBattery {
++    pub percentage: Option<u8>,
++    pub external_power: bool,
+ }
+ 
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  pub enum DesktopAction {
      SetVolume(u8),
@@ -1548,7 +1621,7 @@ index 315fce7..543abbd 100644
      MediaPrevious,
      MediaPlayPause,
      MediaNext,
-@@ -137,10 +141,44 @@ pub fn notify_renderer_fallback(path: &Path, reason: RendererFallback) -> bool {
+@@ -137,10 +148,44 @@ pub fn notify_renderer_fallback(path: &Path, reason: RendererFallback) -> bool {
      run_action(path, ProviderOperation::NotifyRendererFallback(reason)).is_ok()
  }
  
@@ -1594,7 +1667,7 @@ index 315fce7..543abbd 100644
  }
  
  #[derive(Debug, Default)]
-@@ -159,37 +197,82 @@ impl DesktopProvider {
+@@ -159,37 +204,82 @@ impl DesktopProvider {
      /// Starts a worker only for a currently valid provider path.
      #[must_use]
      pub fn start(path: &Path) -> Option<Self> {
@@ -1692,7 +1765,7 @@ index 315fce7..543abbd 100644
      #[must_use]
      pub fn dispatch(&self, action: DesktopAction) -> bool {
          let Ok(mut queue) = self.actions.queue.lock() else {
-@@ -200,10 +283,27 @@ impl DesktopProvider {
+@@ -200,10 +290,27 @@ impl DesktopProvider {
          }
          let action = match action {
              DesktopAction::SetVolume(value) => DesktopAction::SetVolume(value.min(100)),
@@ -1722,7 +1795,7 @@ index 315fce7..543abbd 100644
          {
              *pending = action;
          } else if queue.pending.len() < ACTION_QUEUE_CAPACITY {
-@@ -222,10 +322,21 @@ impl Drop for DesktopProvider {
+@@ -222,13 +329,24 @@ impl Drop for DesktopProvider {
              queue.closed = true;
              self.actions.ready.notify_one();
          }
@@ -1744,8 +1817,12 @@ index 315fce7..543abbd 100644
 +) {
      let mut available = None;
      loop {
-         let state = if let Ok(state) = query_status(path) {
-@@ -241,7 +352,6 @@ fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<D
+-        let state = if let Ok(state) = query_status(path) {
++        let state = if let Ok(state) = query_status_with_battery(path, tools.is_some()) {
+             report_availability(&mut available, true);
+             state
+         } else {
+@@ -241,7 +359,6 @@ fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<D
          if states.send(state).is_err() {
              return;
          }
@@ -1753,7 +1830,7 @@ index 315fce7..543abbd 100644
          let refresh_at = Instant::now() + STATUS_INTERVAL;
          loop {
              let Some(action) = take_action(actions, refresh_at) else {
-@@ -253,8 +363,117 @@ fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<D
+@@ -253,10 +370,119 @@ fn provider_worker(path: &Path, actions: &ActionMailbox, states: &mpsc::Sender<D
              if run_action(path, ProviderOperation::Desktop(action)).is_err() {
                  report_availability(&mut available, false);
              }
@@ -1762,10 +1839,10 @@ index 315fce7..543abbd 100644
 +            {
 +                tools.refresh_microphone();
 +            }
-+        }
-+    }
-+}
-+
+         }
+     }
+ }
+ 
 +fn tools_worker(
 +    monitor: &ToolsMonitor,
 +    mut read_microphone: impl FnMut() -> Option<bool>,
@@ -1804,7 +1881,7 @@ index 315fce7..543abbd 100644
 +            };
 +            requests = next;
 +            continue;
-         }
++        }
 +        requests.refresh_microphone = false;
 +        drop(requests);
 +        // The two queries have separate deadlines. A mute action wakes only
@@ -1855,7 +1932,7 @@ index 315fce7..543abbd 100644
 +    let remaining = fields.next()?;
 +    if fields.next().is_some() {
 +        return None;
-     }
++    }
 +    let (phase, remaining_seconds) = match (phase, number, remaining) {
 +        ("class", 1..=20, seconds) => (LessonPhase::Class(number), Some(seconds.parse().ok()?)),
 +        ("break", 1..=20, seconds) => (LessonPhase::Break(number), Some(seconds.parse().ok()?)),
@@ -1868,10 +1945,53 @@ index 315fce7..543abbd 100644
 +        phase,
 +        remaining_seconds,
 +    })
++}
++
+ fn take_action(actions: &ActionMailbox, deadline: Instant) -> Option<DesktopAction> {
+     let mut queue = actions.queue.lock().ok()?;
+     loop {
+@@ -300,6 +526,40 @@ fn query_status(path: &Path) -> Result<DesktopState, DesktopProviderError> {
+     parse_status(&output)
  }
  
- fn take_action(actions: &ActionMailbox, deadline: Instant) -> Option<DesktopAction> {
-@@ -324,9 +543,16 @@ fn action_arguments(operation: ProviderOperation) -> Vec<OsString> {
++fn query_status_with_battery(
++    path: &Path,
++    extended: bool,
++) -> Result<DesktopState, DesktopProviderError> {
++    if extended && let Ok(output) = run_provider(path, &["v1", "status-with-battery"], true) {
++        return parse_status_with_battery(&output);
++    }
++    query_status(path)
++}
++
++fn parse_status_with_battery(output: &[u8]) -> Result<DesktopState, DesktopProviderError> {
++    let Some(separator) = output.iter().position(|byte| *byte == b'\n') else {
++        return Err(DesktopProviderError::Status);
++    };
++    let mut state = parse_status(&output[..separator])?;
++    let battery =
++        std::str::from_utf8(&output[separator + 1..]).map_err(|_| DesktopProviderError::Status)?;
++    let mut fields = battery.split_ascii_whitespace();
++    let (Some(percentage), Some(power), None) = (fields.next(), fields.next(), fields.next())
++    else {
++        return Err(DesktopProviderError::Status);
++    };
++    let percentage = percentage
++        .parse::<f64>()
++        .ok()
++        .filter(|value| (0.0..=100.0).contains(value))
++        .map(|value| value.round() as u8);
++    state.battery = Some(DesktopBattery {
++        percentage,
++        external_power: parse_flag(power)?,
++    });
++    Ok(state)
++}
++
+ #[derive(Clone, Copy)]
+ enum ProviderOperation {
+     Desktop(DesktopAction),
+@@ -324,9 +584,16 @@ fn action_arguments(operation: ProviderOperation) -> Vec<OsString> {
              arguments.push(OsString::from("set-volume"));
              arguments.push(OsString::from(value.min(100).to_string()));
          }
@@ -1888,7 +2008,78 @@ index 315fce7..543abbd 100644
          ProviderOperation::Desktop(DesktopAction::MediaPrevious) => {
              arguments.push(OsString::from("media-previous"));
          }
-@@ -619,6 +845,7 @@ mod tests {
+@@ -495,6 +762,7 @@ fn parse_status(output: &[u8]) -> Result<DesktopState, DesktopProviderError> {
+         volume,
+         muted,
+         display_off,
++        battery: None,
+     })
+ }
+ 
+@@ -512,6 +780,30 @@ mod tests {
+ 
+     use super::*;
+ 
++    #[test]
++    fn battery_status_rounds_like_plasma_and_keeps_missing_data_unknown() {
++        for (value, expected) in [
++            ("8.74999999999999e1", Some(87)),
++            ("8.75e1", Some(88)),
++            ("100", Some(100)),
++            ("-", None),
++            ("NaN", None),
++            ("101", None),
++        ] {
++            let output = format!("T1BRIDGE-DESKTOP 1 17 42 0 1\n{value} 1\n");
++            let state = parse_status_with_battery(output.as_bytes()).unwrap();
++            assert_eq!(state.volume, Some(42));
++            assert!(!state.display_off);
++            assert_eq!(
++                state.battery,
++                Some(DesktopBattery {
++                    percentage: expected,
++                    external_power: true,
++                }),
++            );
++        }
++    }
++
+     #[test]
+     fn status_parser_accepts_exact_capability_state_combinations() {
+         assert_eq!(
+@@ -524,6 +816,7 @@ mod tests {
+                 volume: Some(42),
+                 muted: true,
+                 display_off: false,
++                battery: None,
+             })
+         );
+         assert_eq!(
+@@ -533,6 +826,7 @@ mod tests {
+                 volume: None,
+                 muted: false,
+                 display_off: false,
++                battery: None,
+             })
+         );
+     }
+@@ -546,6 +840,7 @@ mod tests {
+                 volume: Some(42),
+                 muted: false,
+                 display_off: true,
++                battery: None,
+             })
+         );
+         assert_eq!(
+@@ -555,6 +850,7 @@ mod tests {
+                 volume: None,
+                 muted: false,
+                 display_off: false,
++                battery: None,
+             })
+         );
+         for invalid in [
+@@ -619,6 +915,7 @@ mod tests {
          let provider = DesktopProvider {
              actions: Arc::new(ActionMailbox::default()),
              states: state_receiver,
@@ -1896,7 +2087,7 @@ index 315fce7..543abbd 100644
          };
  
          assert!(provider.dispatch(DesktopAction::SetVolume(20)));
-@@ -639,6 +866,7 @@ mod tests {
+@@ -639,6 +936,7 @@ mod tests {
          let provider = DesktopProvider {
              actions: Arc::new(ActionMailbox::default()),
              states: state_receiver,
@@ -1904,7 +2095,7 @@ index 315fce7..543abbd 100644
          };
  
          assert!(provider.dispatch(DesktopAction::SetVolume(20)));
-@@ -660,6 +888,125 @@ mod tests {
+@@ -660,6 +958,125 @@ mod tests {
          }
      }
  
@@ -2777,7 +2968,7 @@ index 4c0ae87..7de1a20 100644
 +
 +    const fn minimum(self) -> u8 {
 +        match self {
-+            Self::DisplayBrightness => 5,
++            Self::DisplayBrightness => 1,
 +            Self::KeyboardBacklight | Self::Volume => 0,
 +        }
 +    }
@@ -3597,7 +3788,7 @@ index 4c0ae87..7de1a20 100644
 +        assert_eq!(extended.slider_at(contact(193.0)), None);
 +        assert_eq!(
 +            extended.slider_at(contact(194.0)),
-+            Some((SliderControl::DisplayBrightness, 5))
++            Some((SliderControl::DisplayBrightness, 1))
 +        );
 +        assert_eq!(
 +            extended.slider_at(contact(793.0)),
@@ -4034,3 +4225,15 @@ index 0000000..7921272
 +        assert_eq!(parse_code([b'0'; 7]), None);
 +    }
 +}
+diff --git a/crates/t1-touchbar/tests/desktop_provider.rs b/crates/t1-touchbar/tests/desktop_provider.rs
+index b4216c7..1971c78 100644
+--- a/crates/t1-touchbar/tests/desktop_provider.rs
++++ b/crates/t1-touchbar/tests/desktop_provider.rs
+@@ -71,6 +71,7 @@ fn available_state() -> DesktopState {
+         volume: Some(42),
+         muted: false,
+         display_off: false,
++        battery: None,
+     }
+ }
+ 
