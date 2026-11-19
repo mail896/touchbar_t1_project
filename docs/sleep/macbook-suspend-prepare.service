@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare Apple NVMe and Alpine Ridge suspend on MacBookPro14,2
+After=systemd-udev-trigger.service
+Before=sleep.target
+ConditionPathExists=/sys/class/dmi/id/product_name
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/macbook-suspend-prepare
+RemainAfterExit=yes
+TimeoutStartSec=15
+
+[Install]
+WantedBy=multi-user.target

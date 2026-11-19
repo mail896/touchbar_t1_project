@@ -1,0 +1,59 @@
+#!/usr/bin/python3
+"""Apply the MacBookPro14,2 NVMe and Alpine Ridge suspend workarounds."""
+from pathlib import Path
+import sys
+
+
+def main():
+    if Path('/sys/class/dmi/id/product_name').read_text().strip() != 'MacBookPro14,2':
+        return
+    found = 0
+    for device in Path('/sys/bus/pci/devices').iterdir():
+        if ((device / 'vendor').read_text().strip() == '0x106b'
+                and (device / 'device').read_text().strip() == '0x2003'):
+            (device / 'd3cold_allowed').write_text('0')
+            found += 1
+            print(f'{device.name}: Apple NVMe d3cold_allowed=0', flush=True)
+    if found != 1:
+        raise RuntimeError('Expected one Apple S3X NVMe controller')
+
+    # Prevent Alpine Ridge PME waking a closed laptop repeatedly. Preserve
+    # the internal USB controller, lid and SPI keyboard/trackpad wake sources.
+    wake = Path('/proc/acpi/wakeup')
+    targets = {'RP05', 'RP09', 'XHC2', 'XHC3'}
+    for line in wake.read_text().splitlines():
+        columns = line.split()
+        if columns and columns[0] in targets and '*enabled' in line:
+            wake.write_text(columns[0])
+            print(f'{columns[0]}: ACPI wake disabled', flush=True)
+    for bdf in ('0000:00:1c.4', '0000:00:1d.0', '0000:05:00.0',
+                '0000:06:00.0', '0000:7b:00.0', '0000:7c:00.0'):
+        control = Path('/sys/bus/pci/devices') / bdf / 'power/wakeup'
+        if control.exists():
+            control.write_text('disabled')
+    # Only the explicitly enabled, tested driver combination uses this policy.
+    # Main keyboard/trackpad use SPI; do not disable their wake or XHC1/LID0.
+    optins = (
+        Path('/sys/module/thunderbolt/parameters/mbp142_s2idle_lc_skip'),
+        Path('/sys/module/brcmfmac/parameters/mbp142_s2idle_keep_d0'),
+    )
+    if all(flag.is_file() and flag.read_text().strip() == 'Y' for flag in optins):
+        for usb in Path('/sys/bus/usb/devices').iterdir():
+            vendor = usb / 'idVendor'
+            product = usb / 'idProduct'
+            wake_control = usb / 'power/wakeup'
+            if (vendor.is_file() and product.is_file() and wake_control.is_file()
+                    and vendor.read_text().strip() == '05ac'
+                    and product.read_text().strip() == '8600'):
+                wake_control.write_text('disabled')
+                print(f'{usb.name}: iBridge USB wake disabled; SPI/lid wake preserved', flush=True)
+
+    print('Lid, internal USB and SPI wake settings preserved', flush=True)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(f'MacBook suspend preparation failed: {exc}', file=sys.stderr)
+        sys.exit(1)

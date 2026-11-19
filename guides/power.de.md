@@ -77,3 +77,5 @@ sudo install -D -m 0644 libinput/local-overrides.quirks \
 
 Danach einmal ab- und wieder anmelden. In KDE muss „Touchpad beim Tippen
 deaktivieren“ eingeschaltet sein.
+
+Die abschließenden Messwerte und der SSD-Wiederanlauf sind im [Schlafbefund](sleep-results.de.md) dokumentiert.

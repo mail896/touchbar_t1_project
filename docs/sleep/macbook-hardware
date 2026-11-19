@@ -1,0 +1,3 @@
+#!/bin/sh
+# Reapply the device settings immediately before suspend and after resume.
+exec /usr/local/sbin/macbook-suspend-prepare

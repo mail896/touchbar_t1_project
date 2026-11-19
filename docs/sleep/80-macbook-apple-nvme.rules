@@ -1,0 +1,2 @@
+# Apple S3X NVMe must retain power across suspend on pre-T2 MacBooks.
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x106b", ATTR{device}=="0x2003", TEST=="d3cold_allowed", ATTR{d3cold_allowed}="0"
