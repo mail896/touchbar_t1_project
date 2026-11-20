@@ -1,0 +1,12 @@
+[Unit]
+Description=MacBookPro14,2: power idle Thunderbolt controllers off while awake
+After=macbook-tb-poweroff.service
+Requires=macbook-tb-poweroff.service
+
+[Service]
+ExecStart=/usr/local/sbin/macbook-tb-awake idle
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

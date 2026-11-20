@@ -1,0 +1,14 @@
+[Unit]
+Description=MacBookPro14,2: power idle Thunderbolt controllers off during s2idle
+ConditionPathExists=/etc/macbook-s2idle-powersave.conf
+After=systemd-modules-load.service
+Before=sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/macbook-tb-poweroff
+RemainAfterExit=yes
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

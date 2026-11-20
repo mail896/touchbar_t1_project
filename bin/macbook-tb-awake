@@ -1,0 +1,120 @@
+#!/bin/sh
+# MacBookPro14,2: power an Alpine Ridge controller off while awake when nothing
+# is attached on its side, and power it on again when a device is plugged in.
+#
+#   macbook-tb-awake idle     loop (service): power empty sides off
+#   macbook-tb-awake plug P   from udev: device appeared on PCH xHCI port 1-P
+#   macbook-tb-awake on       power both sides on now (e.g. for a monitor)
+#   macbook-tb-awake status
+#
+# With a controller powered off, the USB 2 lines of its USB-C ports are routed
+# to the PCH xHCI (ports 6-9), so USB devices keep working at USB 2 speed.
+# After powering on, the PCH port is cycled once so that the device
+# re-enumerates on the Alpine Ridge xHCI at full speed. USB-C monitors without
+# a USB device are not detected this way: use "on".
+set -u
+
+tag=macbook-tb-awake
+config=/etc/macbook-s2idle-powersave.conf
+param=/sys/module/mbp142_tb_poweroff/parameters/awake
+hold=/run/macbook-tb-awake.hold    # present: never power off automatically
+idle_checks=2                      # empty checks before powering off
+interval=20
+
+log() { logger -t "$tag" -- "$*"; }
+
+feature_on() {
+    [ -w "$param" ] || return 1
+    [ -r "$config" ] || return 1
+    [ "$(. "$config"; echo "${ENABLED:-0}${THUNDERBOLT_POWEROFF:-0}${THUNDERBOLT_AWAKE_POWEROFF:-0}")" = 111 ]
+}
+
+# Per side: Alpine Ridge NHI and xHCI.
+branch_nhi()  { case $1 in RP05) echo 0000:05:00.0 ;; RP09) echo 0000:7b:00.0 ;; esac; }
+branch_xhci() { case $1 in RP05) echo 0000:06:00.0 ;; RP09) echo 0000:7c:00.0 ;; esac; }
+
+is_off() { grep -q "$1=off" "$param" 2>/dev/null; }
+
+# Busy when a USB device is attached to the side's xHCI or a Thunderbolt device
+# to its NHI (any router except the host router x-0).
+# (POSIX sh has no local variables: each function uses its own prefix.)
+branch_busy() {
+    bb_x=/sys/bus/pci/devices/$(branch_xhci "$1")
+    bb_n=$(readlink -f "/sys/bus/pci/devices/$(branch_nhi "$1")")
+    for bb_bus in "$bb_x"/usb*; do
+        [ -d "$bb_bus" ] || continue
+        bb_num=${bb_bus##*/usb}
+        for bb_dev in "$bb_bus"/"$bb_num"-*; do
+            case ${bb_dev##*/} in *:*) continue ;; esac
+            [ -e "$bb_dev" ] && return 0
+        done
+    done
+    for bb_r in /sys/bus/thunderbolt/devices/*-*; do
+        case ${bb_r##*/} in *-0) continue ;; esac
+        case $(readlink -f "$bb_r") in "$bb_n"/*) return 0 ;; esac
+    done
+    return 1
+}
+
+wait_bound() {
+    wb_i=0
+    while [ "$wb_i" -lt 30 ]; do
+        wb_ok=1
+        for wb_b in RP05 RP09; do
+            [ -e "/sys/bus/pci/devices/$(branch_xhci $wb_b)/driver" ] || wb_ok=0
+        done
+        [ "$wb_ok" = 1 ] && return 0
+        wb_i=$((wb_i + 1)); sleep 0.5
+    done
+    return 1
+}
+
+case ${1:-status} in
+    status)
+        cat "$param" 2>/dev/null || echo "module not loaded"
+        feature_on && echo "automatic: on" || echo "automatic: off"
+        ;;
+    on)
+        [ -w "$param" ] && printf on > "$param" && log "both sides powered on (manual)"
+        ;;
+    plug)
+        port=${2:-}
+        port=${port#1-}
+        case $port in 6|7|8|9) ;; *) exit 0 ;; esac
+        grep -q off "$param" 2>/dev/null || exit 0
+        printf on > "$param" || exit 0
+        wait_bound || log "xHCI not bound after power-on"
+        p=/sys/bus/usb/devices/usb1/1-0:1.0/usb1-port$port
+        if [ -w "$p/disable" ]; then
+            printf 1 > "$p/disable"; sleep 1; printf 0 > "$p/disable"
+        fi
+        log "device on PCH port $port: Thunderbolt powered on, port cycled"
+        ;;
+    idle)
+        log "awake power-off started"
+        c05=0; c09=0
+        while :; do
+            sleep "$interval"
+            feature_on || { c05=0; c09=0; continue; }
+            [ -e "$hold" ] && continue
+            for b in RP05 RP09; do
+                is_off "$b" && continue
+                if branch_busy "$b"; then
+                    eval "c${b#RP}=0"
+                    continue
+                fi
+                eval "n=\$((c${b#RP} + 1))"; eval "c${b#RP}=$n"
+                if [ "$n" -ge "$idle_checks" ]; then
+                    if printf %s "$b" > "$param" 2>/dev/null && is_off "$b"; then
+                        log "$b powered off (nothing attached)"
+                    fi
+                    eval "c${b#RP}=0"
+                fi
+            done
+        done
+        ;;
+    *)
+        echo "usage: $0 {status|on|idle|plug PORT}" >&2
+        exit 2
+        ;;
+esac
