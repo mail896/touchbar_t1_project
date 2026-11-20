@@ -1,0 +1,53 @@
+MacBookPro14,2: let a freshly promoted device keybag settle before failing.
+
+Against T1Bridge v0.1.12 (sep-probe/sep_keybag.c). On every cold boot the SEP
+has no device keybag. The relay creates and promotes it and queries its lock
+state at once; the first reply reports flags=0x14 lock=2 (not yet unlocked), so
+the relay stopped with "prepare shared keybags failed" and only systemd's
+restart succeeded. 100 ms later the same read-only query reports it unlocked.
+The patch repeats only that query for up to 2 s and logs the lock flags (no key
+material) when a reply does not pass.
+
+--- a/sep-probe/sep_keybag.c	2026-11-21 00:05:10.346473566 +0100
++++ b/sep-probe/sep_keybag.c	2026-11-21 00:05:10.354473581 +0100
+@@ -374,8 +374,15 @@
+ 	    (reply.kind != SEP_KEYSTORE_REPLY_VALUE_AND_FLAGS ||
+ 	     (require_unlocked &&
+ 	      ((reply.value & KEYBAG_STATE_BEEN_UNLOCKED) == 0 ||
+-	       reply.first_wide_value != 0))))
++	       reply.first_wide_value != 0)))) {
++		/* Lock flags only, no key material. */
++		fprintf(stderr,
++			"t1bridge keybag: lock state of handle %d not unlocked "
++			"(kind=%d flags=0x%x lock=%llu)\n",
++			(int)handle, (int)reply.kind, (unsigned int)reply.value,
++			(unsigned long long)reply.first_wide_value);
+ 		result = SEP_OPERATION_ERROR_KEYBAG;
++	}
+ 	sep_keystore_clear(request, sizeof(request));
+ 	sep_keystore_clear(&reply, sizeof(reply));
+ 	return result;
+@@ -433,9 +440,20 @@
+ 		promote_with_secret ? sizeof(secret) : 0);
+ 	if (result != SEP_OPERATION_OK)
+ 		goto out;
+-	result = inspect_lock_state(
+-		operation, keystore, timestamp, target_handle,
+-		promote_with_secret);
++	/*
++	 * A freshly promoted bag may report its unlocked state only shortly
++	 * after the promotion (first relay start after each boot). Repeat the
++	 * read-only lock-state query for up to two seconds before failing.
++	 */
++	for (unsigned int attempt = 0;; ++attempt) {
++		result = inspect_lock_state(
++			operation, keystore, timestamp, target_handle,
++			promote_with_secret);
++		if (result != SEP_OPERATION_ERROR_KEYBAG ||
++		    !promote_with_secret || attempt >= 20)
++			break;
++		usleep(100000);
++	}
+ 	if (result != SEP_OPERATION_OK)
+ 		goto out;
+ 	if (!promote_with_secret) {
