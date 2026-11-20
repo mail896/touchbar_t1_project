@@ -18,8 +18,8 @@ for Touch Bar and Touch ID remains available.
 On one MacBookPro14,2, battery tests with the drivers bound measured lower
 sleep power in both comparisons (1.85 vs. 2.06 W and 4.17 vs. 4.80 W).
 The runs varied in length. The CPU package stayed at C3 and the S0ix counter
-stayed at zero. S3/deep sleep and hibernation were unreliable on resume on
-the test machine.
+stayed at zero. S3/deep sleep was unreliable on resume on the test machine.
+Hibernation works with the [hibernation](#hibernation) section below.
 
 With `THUNDERBOLT_L1=1`, the hook enables ASPM L1 on both internal
 Thunderbolt links and restores the original Link Control settings after
@@ -53,8 +53,95 @@ If a managed controller is missing after resume:
 sudo macbook-s2idle-recover
 ```
 
-Global options such as `pcie_aspm=force`, forced NVMe D3cold, S3/deep sleep or
-hibernation are not part of this configuration.
+Global options such as `pcie_aspm=force`, forced NVMe D3cold or S3/deep sleep
+are not part of this configuration.
+
+## Thunderbolt controller power-off
+
+macOS powers both Alpine Ridge controllers off while nothing is attached on
+their side. The `mbp142_tb_poweroff` module does the same: on sleep entry it
+signs both controllers off (Go2Sx), sets Link Disable and powers them off
+through Apple's ACPI methods `SXFP`/`XRST`; on resume it restores them through
+`TRPE`. With an external USB or Thunderbolt device attached, the controllers
+stay on. If a check fails, the system sleeps normally; after a failed recovery
+the module disables itself until reloaded.
+
+With `THUNDERBOLT_AWAKE_POWEROFF=1`, `macbook-tb-awake` also powers a side off
+while awake when nothing has been attached there for 40 s. With a controller
+off, the USB-C ports route their USB 2 lines to the PCH, so USB devices work
+immediately at USB 2 speed. The udev rule then powers the controller on and
+cycles the PCH port once so the device re-enumerates at full speed. A USB-C
+monitor without a USB device is not detected this way: `sudo macbook-tb-awake on`.
+
+Battery measurement (1 h): 1.36 W instead of 2.56 W during sleep.
+
+## T1 sleep notification
+
+macOS sends the T1 `ASOC.SOCW(0)` ("host sleeping") before every sleep and
+`SOCW(1)` afterwards through the EC mailbox. Linux never did, so the T1 kept
+running at full power during sleep. With `T1_SOCW=1` the hook sends both
+through the `mbp142_t1_socw` module and restarts the T1Bridge services
+afterwards. Measured (2 h on battery, together with the Thunderbolt power-off):
+about 0.6–0.9 W during sleep, in the range of macOS on the same machine.
+
+Build and install the modules (repeat after every kernel update):
+
+```bash
+for m in mbp142_tb_poweroff mbp142_t1_socw; do
+  make -C /lib/modules/$(uname -r)/build M="$PWD/modules/$m" modules
+  sudo install -D -m 0644 "modules/$m/$m.ko" \
+    "/usr/local/lib/macbook/$(uname -r)/$m.ko"
+done
+sudo install -m 0755 bin/macbook-tb-poweroff bin/macbook-tb-awake /usr/local/sbin/
+sudo install -m 0644 systemd/macbook-tb-poweroff.service \
+  systemd/macbook-tb-awake.service /etc/systemd/system/
+sudo install -m 0644 systemd/90-macbook-tb-awake.rules /etc/udev/rules.d/
+sudo install -D -m 0644 systemd/t1bridge-keybag-after-import.conf \
+  /etc/systemd/system/t1bridge-keybag.service.d/10-after-import.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now macbook-tb-poweroff.service macbook-tb-awake.service
+```
+
+The switches `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF` and `T1_SOCW`
+live in `/etc/macbook-s2idle-powersave.conf`. The keybag drop-in starts
+`t1bridge-keybag` only after `t1bridge-import`; both talk to the T1 SEP over
+USB, and without ordering the first start failed.
+
+## Hibernation
+
+After S4 the Touch Bar and Touch ID stayed dark and Wi-Fi crashed. The
+`macbook-hibernate` hook fixes both: before hibernation it unbinds Wi-Fi, puts
+the device into D3hot and sends the T1 `SOCW(0)`; afterwards it rebinds Wi-Fi,
+sends `SOCW(1)` and restarts the T1Bridge services. With
+`HibernateMode=shutdown` the machine powers off completely after saving the
+image. Measured: at most about 0.4 W during hibernation (1.3 W without these
+steps).
+
+Prerequisites are a swap file and `resume=`/`resume_offset=` on the kernel
+command line:
+
+```bash
+sudo fallocate -l 10G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon --priority 10 /swapfile
+echo '/swapfile none swap sw,pri=10 0 0' | sudo tee -a /etc/fstab
+sudo filefrag -v /swapfile | awk 'NR==4 {print $4}'   # value for resume_offset
+```
+
+Then add `resume=UUID=<root file system UUID> resume_offset=<value>` to the boot
+entry. An image built with `grub-mkstandalone` needs the `lvm` module preloaded
+when root is on LVM and must not be restricted with `--install-modules`. Check
+new boot images in QEMU/OVMF against the whole disk (read-only) first.
+
+```bash
+sudo install -m 0755 systemd/macbook-hibernate \
+  /usr/lib/systemd/system-sleep/macbook-hibernate
+sudo install -D -m 0644 systemd/60-macbook-suspend-then-hibernate.conf \
+  /etc/systemd/sleep.conf.d/60-macbook-suspend-then-hibernate.conf
+```
+
+In KDE power settings for battery, set the lid action to "Sleep" and the sleep
+mode to "Standby, then hibernate". After 60 min on battery the machine then
+hibernates; on AC power it stays in sleep.
 
 ## Touchpad while typing
 

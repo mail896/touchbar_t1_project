@@ -1,7 +1,7 @@
 #!/bin/sh
 # s2idle power saving for MacBookPro14,2.
 # The configuration must explicitly opt in. This hook only handles
-# suspend-to-idle; hibernation and S3/deep sleep are intentionally excluded.
+# suspend-to-idle; hibernation is handled by the macbook-hibernate hook.
 
 set -u
 
@@ -13,6 +13,16 @@ disabled=/etc/macbook-s2idle-powersave.disabled
 log()
 {
     logger -t "$tag" -- "$*"
+}
+
+# Apple's host sleep/wake notification to the T1 (ASOC.SOCW through the EC
+# mailbox), as macOS sends it around every sleep.
+t1_socw()
+{
+    socw=/sys/module/mbp142_t1_socw/parameters/socw
+    [ -e "$socw" ] || insmod "/usr/local/lib/macbook/$(uname -r)/mbp142_t1_socw.ko" 2>/dev/null
+    [ -w "$socw" ] && printf %s "$1" > "$socw" &&
+        [ "$(cat /sys/module/mbp142_t1_socw/parameters/socw_result)" = 0 ]
 }
 
 thunderbolt_l1()
@@ -230,6 +240,18 @@ if [ -f "$state/thunderbolt-l1.json" ]; then
         [ "${1:-}" != pre ] || exit 0
     fi
 fi
+# Keep mbp142_tb_poweroff in line with the configuration before every
+# suspend, also when this hook is disabled (then the controllers stay on).
+tb_poweroff=/sys/module/mbp142_tb_poweroff/parameters/enabled
+if [ "${1:-}" = pre ] && [ -w "$tb_poweroff" ]; then
+    tb_value=N
+    if [ ! -e "$disabled" ] && [ -r "$config" ] &&
+        [ "$(. "$config"; echo "${ENABLED:-0}${THUNDERBOLT_POWEROFF:-0}")" = 11 ]; then
+        tb_value=Y
+    fi
+    printf '%s' "$tb_value" > "$tb_poweroff" &&
+        log "Thunderbolt power-off during s2idle: $tb_value"
+fi
 [ -e "$disabled" ] && exit 0
 [ -r "$config" ] || exit 0
 
@@ -297,11 +319,32 @@ case ${1:-} in
             fi
                 ;;
         esac
+        if [ "${T1_SOCW:-0}" = 1 ]; then
+            # Stop the keybag relay cleanly instead of letting it fail on the
+            # T1 connection that drops during wake. It is restarted in post.
+            systemctl stop t1bridge-keybag.service 2>/dev/null
+            if t1_socw 0; then
+                : > "$state/t1-socw"
+                log "T1: SOCW(0) (host sleeping) sent"
+            else
+                log "T1: SOCW(0) not possible"
+            fi
+        fi
         log "pre-s2idle power save complete"
         ;;
     post)
         [ -d "$state" ] || exit 0
         log "post-s2idle restore begins"
+        if [ -f "$state/t1-socw" ]; then
+            if t1_socw 1; then
+                log "T1: SOCW(1) (host awake) sent"
+            else
+                log "T1: SOCW(1) not possible"
+            fi
+            systemctl restart t1-ncm-ready@eth0.service t1-xart-storage@eth0.service \
+                t1-touchbar-hw.service t1bridge-keybag.service 2>/dev/null &&
+                log "T1: services restarted"
+        fi
 
         # Restore parent controllers before their xHCI children.
         bind_if_marked 0000:05:00.0 thunderbolt || true

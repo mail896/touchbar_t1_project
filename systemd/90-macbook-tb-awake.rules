@@ -1,0 +1,3 @@
+# MacBookPro14,2: a device plugged into a USB-C port whose Thunderbolt controller
+# is powered off appears on the PCH xHCI (ports 6-9). Power the controller on.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="1-[6-9]", RUN+="/usr/bin/systemd-run --no-block --collect --quiet /usr/local/sbin/macbook-tb-awake plug %k"

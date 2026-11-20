@@ -18,3 +18,27 @@ Auch bei beidseitiger Thunderbolt-Taktfreigabe, getesteter RP12-Sequenz, SOCW oh
 Das Ziel bleibt ein deutlich niedrigerer realer Akkuverbrauch bei zuverlässigem Wiederanlauf. Die private Übergabe und die zugehörigen Originalmessungen stehen auf dem Transfer-Volume unter `Debian-Schlaf-2026-11-19/UEBERGABE.txt`. Die bestehenden Apple-Ergebnisse liegen daneben unter `macOS/Ergebnisse/`.
 
 Der Ordner `docs/sleep/` enthält die geprüften gerätespezifischen Regeln, den Vorbereitungshook, seinen Dienst und die beiden eingesetzten Debian-Treiberpatches als Referenz.
+
+## Nachtrag 20. November 2026
+
+| Stand | Schlafverbrauch auf Akku |
+| --- | --- |
+| Basis vom 19.11. (siehe oben) | 2,56 W |
+| plus Thunderbolt-Abschaltung (`mbp142_tb_poweroff`), 1 h | 1,36 W (bis 1,69 W bei unsicherem Startwert) |
+| plus T1-Schlafmeldung `SOCW(0)`/`SOCW(1)`, 2 h | etwa 0,6–0,9 W (Rohwert 0,69 W, später stabil 0,88 W) |
+| Ruhezustand mit WLAN in D3hot, `SOCW(0)` und `HibernateMode=shutdown`, 1 h | höchstens etwa 0,4 W |
+| Ruhezustand ohne diese Schritte, 2 h | 1,28–1,43 W |
+
+Alle Werte stammen aus dem Akkuzähler. Nach längerer Ruhe korrigiert er
+sprunghaft um ±50–90 mAh, kürzere Läufe sind daher ungenau. Die macOS-Werte
+desselben Geräts (0,70–1,03 W je nach Auswertung) sind auf demselben Weg
+entstanden.
+
+Nach S3/S4 fehlte der T1 Apples Weck-Nachricht `SOCW(1)`. Touch Bar und
+Touch ID blieben dunkel, obwohl alle T1Bridge-Dienste „ready“ meldeten. `SOCW(1)`
+und ein Neustart der Dienste beheben das. Der Hardware-Reset `ASOC.FRST`
+schickt die T1 dagegen in den Recovery-Modus, ein Neustart stellt sie wieder
+her. Er gehört nicht in den Ablauf.
+
+PCH-SLP_S0 bleibt weiter bei null. Am Schlafeintritt ist nur noch der
+XHCI-Block an, der auch unter macOS an dieser Stelle „an“ meldet.
