@@ -101,17 +101,38 @@ sudo install -m 0755 bin/macbook-tb-poweroff bin/macbook-tb-awake /usr/local/sbi
 sudo install -m 0644 systemd/macbook-tb-poweroff.service \
   systemd/macbook-tb-awake.service /etc/systemd/system/
 sudo install -m 0644 systemd/90-macbook-tb-awake.rules /etc/udev/rules.d/
-sudo install -D -m 0644 systemd/t1bridge-keybag-after-import.conf \
-  /etc/systemd/system/t1bridge-keybag.service.d/10-after-import.conf
 sudo systemctl daemon-reload
 sudo systemctl enable --now macbook-tb-poweroff.service macbook-tb-awake.service
 ```
 
 Die Schalter `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF` und `T1_SOCW`
-stehen in `/etc/macbook-s2idle-powersave.conf`. Der Keybag-Drop-in sorgt
-dafür, dass `t1bridge-keybag` erst nach `t1bridge-import` startet. Beide
-sprechen über USB mit dem SEP der T1, und ohne Reihenfolge scheiterte der erste
-Start.
+stehen in `/etc/macbook-s2idle-powersave.conf`.
+
+## Keybag-Relay beim Start
+
+`t1bridge-keybag` scheiterte bei jedem Start einmal („prepare shared keybags
+failed“) und lief erst beim automatischen Neustart. Das Diagnoseprotokoll zeigt
+den Grund: Nach dem Booten hat das SEP keine Geräte-Keybag. Der Relay legt sie
+an, befördert sie und fragt sofort den Sperrstatus ab. Die erste Antwort meldet
+noch „nicht entsperrt“ (Flags `0x14`, Sperrwert 2), 100 ms später ist sie
+entsperrt. `keybag-lockstate.patch` (gegen T1Bridge v0.1.12) wiederholt nur
+diese Leseabfrage bis zu 2 s. Mit dem Patch läuft der Relay beim ersten
+Versuch durch (`NRestarts=0`).
+
+```bash
+# im T1Bridge-v0.1.12-Quellbaum, libsystemd-dev wird gebraucht
+patch -p1 < /pfad/zu/touchbar_t1_project/keybag-lockstate.patch
+cargo build --release --locked -p t1-daemons --features keybag-relay-service \
+  --bin t1-keybag-relay
+sudo install -D -m 0755 target/release/t1-keybag-relay \
+  /usr/local/lib/macbook/t1-keybag-relay
+sudo install -D -m 0644 /pfad/zu/touchbar_t1_project/systemd/t1bridge-keybag-lockstate.conf \
+  /etc/systemd/system/t1bridge-keybag.service.d/20-lockstate-fix.conf
+sudo systemctl daemon-reload
+```
+
+Rückweg: den Drop-in löschen und `systemctl daemon-reload`, dann läuft wieder
+der Relay aus dem Paket.
 
 ## Ruhezustand (Hibernate)
 

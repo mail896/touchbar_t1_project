@@ -96,16 +96,38 @@ sudo install -m 0755 bin/macbook-tb-poweroff bin/macbook-tb-awake /usr/local/sbi
 sudo install -m 0644 systemd/macbook-tb-poweroff.service \
   systemd/macbook-tb-awake.service /etc/systemd/system/
 sudo install -m 0644 systemd/90-macbook-tb-awake.rules /etc/udev/rules.d/
-sudo install -D -m 0644 systemd/t1bridge-keybag-after-import.conf \
-  /etc/systemd/system/t1bridge-keybag.service.d/10-after-import.conf
 sudo systemctl daemon-reload
 sudo systemctl enable --now macbook-tb-poweroff.service macbook-tb-awake.service
 ```
 
 The switches `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF` and `T1_SOCW`
-live in `/etc/macbook-s2idle-powersave.conf`. The keybag drop-in starts
-`t1bridge-keybag` only after `t1bridge-import`; both talk to the T1 SEP over
-USB, and without ordering the first start failed.
+live in `/etc/macbook-s2idle-powersave.conf`.
+
+## Keybag relay at boot
+
+`t1bridge-keybag` failed once on every boot ("prepare shared keybags failed")
+and only ran after systemd restarted it. The diagnostic log shows why: after a
+boot the SEP has no device keybag. The relay creates and promotes it and then
+queries its lock state at once. The first reply still reports "not unlocked"
+(flags `0x14`, lock value 2); 100 ms later it is unlocked.
+`keybag-lockstate.patch` (against T1Bridge v0.1.12) repeats only this read-only
+query for up to 2 s. With the patch the relay succeeds on its first attempt
+(`NRestarts=0`).
+
+```bash
+# in a T1Bridge v0.1.12 source tree; needs libsystemd-dev
+patch -p1 < /path/to/touchbar_t1_project/keybag-lockstate.patch
+cargo build --release --locked -p t1-daemons --features keybag-relay-service \
+  --bin t1-keybag-relay
+sudo install -D -m 0755 target/release/t1-keybag-relay \
+  /usr/local/lib/macbook/t1-keybag-relay
+sudo install -D -m 0644 /path/to/touchbar_t1_project/systemd/t1bridge-keybag-lockstate.conf \
+  /etc/systemd/system/t1bridge-keybag.service.d/20-lockstate-fix.conf
+sudo systemctl daemon-reload
+```
+
+To return to the packaged relay, delete the drop-in and run
+`systemctl daemon-reload`.
 
 ## Hibernation
 
