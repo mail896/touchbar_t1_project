@@ -1,0 +1,14 @@
+[Unit]
+Description=MacBookPro14,2: resume from s2idle when the lid opens (EC GPE wake)
+ConditionPathExists=/etc/macbook-s2idle-powersave.conf
+After=systemd-modules-load.service
+Before=sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/macbook-lid-wake
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

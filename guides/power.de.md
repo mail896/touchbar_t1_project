@@ -122,6 +122,41 @@ Die Schalter `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF`,
 `THUNDERBOLT_AWAKE_L1` und `T1_SOCW`
 stehen in `/etc/macbook-s2idle-powersave.conf`.
 
+## Aufwachen beim Aufklappen
+
+Das Aufklappen weckte das System nicht, der Bildschirm blieb dunkel, bis eine
+Taste gedrückt wurde. Der Deckel meldet sich nur über den EC: Die Abfrage `_Q20`
+löst `Notify(LID0, 0x80)` auf dem EC-GPE (0x07) aus. Der eigene Weck-GPE 0x6F
+von LID0 löst unter Linux nie aus. Linux schaltet den EC-GPE im s2idle nur
+scharf, wenn ein LPS0-Gerät existiert (`lps0_device_attach()` in
+`drivers/acpi/x86/s2idle.c`), und dieses Gerät gibt es hier nicht. Im s2idle war
+der EC-GPE also aus, und nur die SPI-Tastatur konnte wecken. Das
+Deckel-Ereignis wurde erst nach diesem Aufwachen verarbeitet, deshalb stand im
+Journal trotzdem „Lid opened“.
+
+`mbp142_lid_wake` macht, was der Kernel auf LPS0-Geräten macht: Es markiert den
+EC-GPE als Weckquelle und setzt seine Weckmaske zwischen `PM_SUSPEND_PREPARE`
+und `PM_POST_SUSPEND` (nur wenn s2idle der Standard ist; Ruhezustand und
+Ausschalten sehen die Maske nie). Im s2idle wird das EC-Ereignis dann
+verarbeitet, das Deckel-Notify meldet einen Weckgrund, und das System wacht auf
+(„Wakeup after ACPI Notify sync“). Gemessen: 45 min Schlaf auf Akku ohne einen
+einzigen EC-Zwischenwecker, Verbrauch im selben Bereich wie ohne Modul.
+
+```bash
+make -C /lib/modules/$(uname -r)/build M="$PWD/modules/mbp142_lid_wake" modules
+sudo install -D -m 0644 modules/mbp142_lid_wake/mbp142_lid_wake.ko \
+  "/usr/local/lib/macbook/$(uname -r)/mbp142_lid_wake.ko"
+sudo install -m 0755 bin/macbook-lid-wake /usr/local/sbin/
+sudo install -m 0644 systemd/macbook-lid-wake.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now macbook-lid-wake.service
+```
+
+Der Schalter heißt `LID_WAKE` in `/etc/macbook-s2idle-powersave.conf`. Ab dem
+nächsten Schlaf abschalten: `0` nach
+`/sys/module/mbp142_lid_wake/parameters/enabled` schreiben oder das Modul
+entladen.
+
 ## Keybag-Relay beim Start
 
 `t1bridge-keybag` scheiterte bei jedem Start einmal („prepare shared keybags

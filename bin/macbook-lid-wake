@@ -1,0 +1,35 @@
+#!/bin/sh
+# MacBookPro14,2: load mbp142_lid_wake at boot when LID_WAKE=1 is set in
+# /etc/macbook-s2idle-powersave.conf. The module arms the EC GPE as a wake
+# source during s2idle so that opening the lid resumes the system (without
+# it only a key press does). A failure here never delays the boot.
+set -u
+
+tag=macbook-lid-wake
+config=/etc/macbook-s2idle-powersave.conf
+module=/usr/local/lib/macbook/$(uname -r)/mbp142_lid_wake.ko
+
+log() { logger -t "$tag" -- "$*"; }
+
+[ "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" = MacBookPro14,2 ] || exit 0
+[ -r "$config" ] || exit 0
+# shellcheck disable=SC1090
+. "$config"
+if [ "${LID_WAKE:-0}" != 1 ]; then
+    log "LID_WAKE is not 1, module not loaded"
+    exit 0
+fi
+if [ -d /sys/module/mbp142_lid_wake ]; then
+    log "module already loaded"
+    exit 0
+fi
+if [ ! -r "$module" ]; then
+    log "no module for kernel $(uname -r) at $module"
+    exit 0
+fi
+if /sbin/insmod "$module"; then
+    log "module loaded (EC GPE $(cat /sys/module/mbp142_lid_wake/parameters/gpe 2>/dev/null))"
+else
+    log "loading $module failed"
+fi
+exit 0
