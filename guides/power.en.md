@@ -182,3 +182,22 @@ sudo install -D -m 0644 libinput/local-overrides.quirks \
 
 Log out and back in once. KDE's “disable touchpad while typing” option must be
 enabled.
+
+## Text boot without error lines
+
+Apple's ACPI tables produce kernel errors on every boot (`AE_ALREADY_EXISTS`
+for the CPU SSDTs, missing `\_SB.OSCP`), plus harmless Bluetooth, DMAR and SGX
+messages. With `quiet loglevel=3` the kernel does not print them. They still
+appeared in cyan: Plymouth 24 starts from the initrd even without `splash` (the
+initramfs script defaults to `SPLASH=true`), reads the kernel log itself and
+shows it regardless of `loglevel=3`.
+
+For a text boot with systemd's `[  OK  ]` lines and no error lines, drop
+`splash` from the kernel command line and add:
+
+```
+quiet loglevel=3 systemd.show_status=true plymouth.enable=0
+```
+
+The kernel then does the filtering. In rEFInd, `graphics on` in the
+`menuentry` avoids the "Booting OS" text screen before GRUB.

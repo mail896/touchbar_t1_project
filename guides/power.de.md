@@ -192,3 +192,22 @@ Danach einmal ab- und wieder anmelden. In KDE muss „Touchpad beim Tippen
 deaktivieren“ eingeschaltet sein.
 
 Die abschließenden Messwerte und der SSD-Wiederanlauf sind im [Schlafbefund](sleep-results.de.md) dokumentiert.
+
+## Textstart ohne Fehlerzeilen
+
+Apples ACPI-Tabellen erzeugen bei jedem Start Kernelfehler (`AE_ALREADY_EXISTS`
+für die CPU-SSDTs, fehlendes `\_SB.OSCP`), dazu kommen harmlose Meldungen von
+Bluetooth, DMAR und SGX. Mit `quiet loglevel=3` zeigt der Kernel sie nicht an.
+Sie erschienen trotzdem türkis auf dem Bildschirm: Plymouth 24 startet aus der
+initrd auch ohne `splash` (das initramfs-Skript nimmt `SPLASH=true` an), liest
+die Kernelmeldungen selbst und gibt sie an `loglevel=3` vorbei aus.
+
+Für einen Textstart mit den systemd-Zeilen `[  OK  ]` und ohne Fehlerzeilen
+`splash` aus der Startzeile nehmen und ergänzen:
+
+```
+quiet loglevel=3 systemd.show_status=true plymouth.enable=0
+```
+
+Der Kernel filtert dann selbst. In rEFInd verhindert `graphics on` im
+`menuentry` den Textbildschirm „Booting OS“ vor GRUB.
