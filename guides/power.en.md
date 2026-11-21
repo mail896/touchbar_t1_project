@@ -117,6 +117,39 @@ The switches `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF`,
 `THUNDERBOLT_AWAKE_L1` and `T1_SOCW`
 live in `/etc/macbook-s2idle-powersave.conf`.
 
+## Lid wake from s2idle
+
+Opening the lid did not resume the system; the screen stayed dark until a key
+was pressed. The lid reports only through the EC: query `_Q20` does
+`Notify(LID0, 0x80)` on the EC GPE (0x07). LID0's own wake GPE 0x6F never
+fires under Linux. Linux arms the EC GPE for suspend-to-idle only when an LPS0
+device exists (`lps0_device_attach()` in `drivers/acpi/x86/s2idle.c`), and this
+machine has none. So the EC GPE was off during s2idle and only the SPI keyboard
+could wake the system. The lid event was processed after that wake, which is
+why the journal still showed "Lid opened".
+
+`mbp142_lid_wake` does what the kernel does on LPS0 machines: it marks the EC
+GPE as wake-capable and sets its wake mask between `PM_SUSPEND_PREPARE` and
+`PM_POST_SUSPEND` (only when s2idle is the default; hibernation and power-off
+never see the mask). During s2idle the EC event is then dispatched, the lid
+notify reports a wakeup and the system resumes ("Wakeup after ACPI Notify
+sync"). Measured: 45 min asleep on battery without a single intermediate EC
+wakeup; consumption in the same range as without the module.
+
+```bash
+make -C /lib/modules/$(uname -r)/build M="$PWD/modules/mbp142_lid_wake" modules
+sudo install -D -m 0644 modules/mbp142_lid_wake/mbp142_lid_wake.ko \
+  "/usr/local/lib/macbook/$(uname -r)/mbp142_lid_wake.ko"
+sudo install -m 0755 bin/macbook-lid-wake /usr/local/sbin/
+sudo install -m 0644 systemd/macbook-lid-wake.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now macbook-lid-wake.service
+```
+
+The switch is `LID_WAKE` in `/etc/macbook-s2idle-powersave.conf`. To stop it
+from the next sleep on, write `0` to
+`/sys/module/mbp142_lid_wake/parameters/enabled` or unload the module.
+
 ## Keybag relay at boot
 
 `t1bridge-keybag` failed once on every boot ("prepare shared keybags failed")
