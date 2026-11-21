@@ -258,6 +258,18 @@ systemctl --user enable --now als-brightness.service
 journalctl --user -u als-brightness -f
 ```
 
+Für einen Menüeintrag, der den Dienst ein- und ausschaltet (mit kurzer
+Meldung; die Wahl bleibt über Neustarts erhalten):
+
+```bash
+install -D -m 0755 bin/als-brightness-toggle ~/.local/bin/als-brightness-toggle
+install -D -m 0644 desktop/als-brightness-toggle.desktop \
+  ~/.local/share/applications/als-brightness-toggle.desktop
+```
+
+„Auto-Helligkeit ein/aus“ lässt sich dann ins Panel legen oder mit einem
+Tastenkürzel belegen. Rechtsklick bietet „Einschalten“ und „Ausschalten“.
+
 Beim ersten Start wird die aktuelle Helligkeit zur Vorliebe. Abschalten mit
 `systemctl --user disable --now als-brightness.service`.
 

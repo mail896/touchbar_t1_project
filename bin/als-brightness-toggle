@@ -1,0 +1,31 @@
+#!/bin/sh
+# Toggles automatic display brightness (als-brightness.service).
+# No argument: toggle. "on" / "off" / "status" explicitly.
+# The state survives reboots (enable/disable).
+set -u
+SERVICE=als-brightness.service
+
+notify() {
+    notify-send -a "Auto brightness" -i "$1" -t 2500 "$2" "$3" 2>/dev/null || true
+}
+
+on() {
+    systemctl --user enable --now "$SERVICE" >/dev/null 2>&1
+    notify brightness-high "Auto brightness on" \
+        "Brightness follows the ambient light."
+}
+
+off() {
+    systemctl --user disable --now "$SERVICE" >/dev/null 2>&1
+    notify brightness-low "Auto brightness off" \
+        "Brightness stays where it is."
+}
+
+case "${1:-toggle}" in
+    on) on ;;
+    off) off ;;
+    status) systemctl --user is-active "$SERVICE" ;;
+    *)
+        if systemctl --user is-active --quiet "$SERVICE"; then off; else on; fi
+        ;;
+esac

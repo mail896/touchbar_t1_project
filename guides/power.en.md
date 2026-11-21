@@ -248,6 +248,18 @@ systemctl --user enable --now als-brightness.service
 journalctl --user -u als-brightness -f
 ```
 
+For a menu entry that switches the service on and off (with a short
+notification; the choice survives reboots):
+
+```bash
+install -D -m 0755 bin/als-brightness-toggle ~/.local/bin/als-brightness-toggle
+install -D -m 0644 desktop/als-brightness-toggle.desktop \
+  ~/.local/share/applications/als-brightness-toggle.desktop
+```
+
+"Auto brightness on/off" can then be added to the panel or given a global
+shortcut. Right-click offers "Turn on" and "Turn off".
+
 On the first start the current brightness becomes the preference. Disable with
 `systemctl --user disable --now als-brightness.service`.
 
