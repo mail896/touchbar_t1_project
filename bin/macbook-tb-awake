@@ -12,6 +12,13 @@
 # After powering on, the PCH port is cycled once so that the device
 # re-enumerates on the Alpine Ridge xHCI at full speed. USB-C monitors without
 # a USB device are not detected this way: use "on".
+#
+# THUNDERBOLT_AWAKE_L1=1: enable ASPM L1 on the root port and the Alpine Ridge
+# bridge of every powered side. The firmware leaves ASPM disabled and Linux
+# does not touch it because the FADT declares no ASPM support; without L1 the
+# CPU package stays in PC3 while a controller is on (measured +1.4 W package,
+# +1.6 W battery). L1 is cleared again when an external Thunderbolt router or
+# display is present, as in the s2idle hook.
 set -u
 
 tag=macbook-tb-awake
@@ -34,6 +41,57 @@ branch_nhi()  { case $1 in RP05) echo 0000:05:00.0 ;; RP09) echo 0000:7b:00.0 ;;
 branch_xhci() { case $1 in RP05) echo 0000:06:00.0 ;; RP09) echo 0000:7c:00.0 ;; esac; }
 
 is_off() { grep -q "$1=off" "$param" 2>/dev/null; }
+
+# Per side: root port and bridge, with the expected root port ID.
+branch_root()    { case $1 in RP05) echo 00:1c.4 ;; RP09) echo 00:1d.0 ;; esac; }
+branch_bridge()  { case $1 in RP05) echo 03:00.0 ;; RP09) echo 79:00.0 ;; esac; }
+branch_root_id() { case $1 in RP05) echo 9d148086 ;; RP09) echo 9d188086 ;; esac; }
+
+l1_wanted() {
+    [ -r "$config" ] || return 1
+    [ "$(. "$config"; echo "${THUNDERBOLT_AWAKE_L1:-0}")" = 1 ] || return 1
+    # External Thunderbolt router (anything but the host router x-0)
+    for lw_r in /sys/bus/thunderbolt/devices/*-*; do
+        [ -e "$lw_r/authorized" ] || continue
+        case ${lw_r##*/} in *-0) continue ;; esac
+        return 1
+    done
+    # External display (eDP and the Touch Bar via appletbdrm do not count)
+    for lw_c in /sys/class/drm/card*-*/status; do
+        [ -r "$lw_c" ] || continue
+        case $lw_c in *-eDP-*|*-USB-*) continue ;; esac
+        [ "$(cat "$lw_c")" = connected ] && return 1
+    done
+    return 0
+}
+
+# Set (1) or clear (0) the L1 bit (LNKCTL bit 1) on a powered side, only after
+# checking the device IDs and touching nothing but that bit.
+l1_set() {
+    is_off "$1" && return 0
+    ls_root=$(branch_root "$1"); ls_br=$(branch_bridge "$1")
+    [ "$(setpci -s "$ls_root" 0.l 2>/dev/null)" = "$(branch_root_id "$1")" ] || return 1
+    [ "$(setpci -s "$ls_br" 0.l 2>/dev/null)" = 15788086 ] || return 1
+    ls_change=0
+    for ls_d in "$ls_root" "$ls_br"; do
+        ls_v=$(setpci -s "$ls_d" CAP_EXP+10.w 2>/dev/null) || return 1
+        ls_has=$(( 0x$ls_v & 2 ))
+        if [ "$2" = 1 ] && [ "$ls_has" = 0 ]; then
+            setpci -s "$ls_d" CAP_EXP+10.w=0002:0002 || return 1; ls_change=1
+        elif [ "$2" = 0 ] && [ "$ls_has" != 0 ]; then
+            setpci -s "$ls_d" CAP_EXP+10.w=0000:0002 || return 1; ls_change=1
+        fi
+    done
+    [ "$ls_change" = 1 ] && log "$1 L1 $( [ "$2" = 1 ] && echo enabled || echo cleared ): $ls_root=$(setpci -s "$ls_root" CAP_EXP+10.w) $ls_br=$(setpci -s "$ls_br" CAP_EXP+10.w)"
+    return 0
+}
+
+l1_update() {
+    if l1_wanted; then lu_v=1; else lu_v=0; fi
+    for lu_b in RP05 RP09; do
+        l1_set "$lu_b" "$lu_v" || log "$lu_b L1: unexpected device ID or access error, nothing changed"
+    done
+}
 
 # Busy when a USB device is attached to the side's xHCI or a Thunderbolt device
 # to its NHI (any router except the host router x-0).
@@ -76,6 +134,7 @@ case ${1:-status} in
         ;;
     on)
         [ -w "$param" ] && printf on > "$param" && log "both sides powered on (manual)"
+        wait_bound && l1_update
         ;;
     plug)
         port=${2:-}
@@ -89,13 +148,21 @@ case ${1:-status} in
             printf 1 > "$p/disable"; sleep 1; printf 0 > "$p/disable"
         fi
         log "device on PCH port $port: Thunderbolt powered on, port cycled"
+        l1_update
         ;;
     idle)
         log "awake power-off started"
-        c05=0; c09=0
+        c05=0; c09=0; l1_last=
         while :; do
             sleep "$interval"
             feature_on || { c05=0; c09=0; continue; }
+            # Check L1 only after a state change (e.g. after sleep, when the
+            # module powered both sides on). Plugging in and "on" set L1 directly.
+            l1_now=$(cat "$param" 2>/dev/null)
+            if [ "$l1_now" != "$l1_last" ]; then
+                l1_update
+                l1_last=$l1_now
+            fi
             [ -e "$hold" ] && continue
             for b in RP05 RP09; do
                 is_off "$b" && continue

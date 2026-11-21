@@ -80,6 +80,19 @@ erkannt: `sudo macbook-tb-awake on`.
 
 Messung auf Akku (1 h): 1,36 W statt 2,56 W im Schlaf.
 
+Wach im Leerlauf mit ausgeschaltetem Bildschirm braucht das Gerät auf Akku
+3,7 W mit beiden Seiten aus und 7,2 W mit beiden Seiten an.
+
+Mit `THUNDERBOLT_AWAKE_L1=1` setzt `macbook-tb-awake` ASPM L1 auf Root Port und
+Alpine-Ridge-Bridge jeder eingeschalteten Seite (nach dem Anstecken, nach `on`
+und nach jedem Zustandswechsel). Die Firmware lässt diese Links auf „ASPM
+Disabled“, und Linux fasst ASPM nicht an, weil das FADT keine ASPM-Unterstützung
+meldet. Ohne L1 bleibt das CPU-Paket bei eingeschaltetem Controller in PC3. Mit
+beiden Seiten an: 5,5 W statt 7,1 W, Paket 0,78 W statt 2,17 W. Mit
+angestecktem USB-Stick sinkt das Paket von etwa 1,9 W auf 0,93 W, bei gleicher
+Datenrate. Bei externem Thunderbolt-Router oder Bildschirm wird L1
+zurückgenommen. Schalter auf 0 nimmt es innerhalb von 20 s zurück.
+
 ## T1-Schlafmeldung
 
 macOS schickt der T1 vor jedem Schlaf `ASOC.SOCW(0)` („Host schläft“) und
@@ -105,7 +118,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now macbook-tb-poweroff.service macbook-tb-awake.service
 ```
 
-Die Schalter `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF` und `T1_SOCW`
+Die Schalter `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF`,
+`THUNDERBOLT_AWAKE_L1` und `T1_SOCW`
 stehen in `/etc/macbook-s2idle-powersave.conf`.
 
 ## Keybag-Relay beim Start

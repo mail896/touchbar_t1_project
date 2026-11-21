@@ -75,6 +75,19 @@ monitor without a USB device is not detected this way: `sudo macbook-tb-awake on
 
 Battery measurement (1 h): 1.36 W instead of 2.56 W during sleep.
 
+Awake and idle with the display off, both sides off draw 3.7 W on battery,
+both sides on 7.2 W.
+
+With `THUNDERBOLT_AWAKE_L1=1`, `macbook-tb-awake` enables ASPM L1 on the root
+port and the Alpine Ridge bridge of every powered side (after plugging in, after
+`on` and after each state change). The firmware leaves these links at "ASPM
+Disabled", and Linux does not touch ASPM because the FADT declares no ASPM
+support. Without L1 the CPU package stays in PC3 while a controller is on.
+With both sides on: 5.5 W instead of 7.1 W, package 0.78 W instead of 2.17 W;
+with a USB stick attached the package drops from about 1.9 W to 0.93 W, at the
+same transfer rate. L1 is cleared again when an external Thunderbolt router or
+display is present. Set the switch to 0 to clear it within 20 s.
+
 ## T1 sleep notification
 
 macOS sends the T1 `ASOC.SOCW(0)` ("host sleeping") before every sleep and
@@ -100,7 +113,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now macbook-tb-poweroff.service macbook-tb-awake.service
 ```
 
-The switches `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF` and `T1_SOCW`
+The switches `THUNDERBOLT_POWEROFF`, `THUNDERBOLT_AWAKE_POWEROFF`,
+`THUNDERBOLT_AWAKE_L1` and `T1_SOCW`
 live in `/etc/macbook-s2idle-powersave.conf`.
 
 ## Keybag relay at boot
