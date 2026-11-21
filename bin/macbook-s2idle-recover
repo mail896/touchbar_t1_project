@@ -2,6 +2,27 @@
 # Manual recovery after the isolated MacBookPro14,2 s2idle experiment.
 set -u
 
+# Patched thunderbolt/brcmfmac modules carry the s2idle opt-in switches. The
+# copies in /lib/modules are the unpatched distribution modules, and insmod
+# does not read module options from the kernel command line, so load the
+# patched module explicitly with its switch. Fall back to modprobe only when
+# no patched module exists for the running kernel.
+module_dir=${MACBOOK_MODULE_DIR:-/usr/local/lib/macbook/$(uname -r)}
+
+load_patched()
+{
+    name=$1
+    option=$2
+    shift 2
+    [ -d "/sys/module/$name" ] && return 0
+    if [ -r "$module_dir/$name.ko" ]; then
+        [ "$#" -gt 0 ] && modprobe -a "$@"
+        insmod "$module_dir/$name.ko" "$option=1" && return 0
+    fi
+    echo "macbook-s2idle-recover: patched $name not loaded, using modprobe" >&2
+    modprobe "$name"
+}
+
 bind_if_free()
 {
     device=$1
@@ -11,9 +32,9 @@ bind_if_free()
     printf '%s' "$device" > "/sys/bus/pci/drivers/$driver/bind"
 }
 
-modprobe thunderbolt || true
+load_patched thunderbolt mbp142_s2idle_lc_skip || true
 modprobe xhci_pci || true
-modprobe brcmfmac || true
+load_patched brcmfmac mbp142_s2idle_keep_d0 brcmutil cfg80211 mmc_core usbcore || true
 bind_if_free 0000:05:00.0 thunderbolt || true
 bind_if_free 0000:7b:00.0 thunderbolt || true
 sleep 1
