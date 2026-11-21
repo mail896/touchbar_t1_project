@@ -1,0 +1,12 @@
+[Unit]
+Description=Automatic display brightness from the ambient light sensor
+After=plasma-powerdevil.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/als-brightness
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

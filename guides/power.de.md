@@ -225,3 +225,41 @@ quiet loglevel=3 systemd.show_status=true plymouth.enable=0
 
 Der Kernel filtert dann selbst. In rEFInd verhindert `graphics on` im
 `menuentry` den Textbildschirm „Booting OS“ vor GRUB.
+
+## Automatische Helligkeit nach dem Lichtsensor
+
+Der Umgebungslichtsensor hängt als HID-Sensor (`05AC:8600`) an der T1.
+Debian lädt `hid_sensor_als`, und `iio-sensor-proxy` meldet ihn über D-Bus.
+Plasma 6.3 nutzt ihn nicht. `als-brightness` ist ein kleiner Benutzerdienst:
+
+- Er bildet Lux über eine logarithmische Kennlinie auf Prozent ab.
+- Eine Änderung per Touch Bar oder KDE-Regler lernt er als Versatz zur
+  Kennlinie (`~/.config/als-brightness.json`).
+- Heller regelt er nach etwa 1 s, dunkler erst nach etwa 4 s.
+- Beim Zuklappen und vor dem Schlaf gibt er den Sensor frei.
+
+Er schreibt die Helligkeit über logind (`Session.SetBrightness`), auf demselben
+Weg wie der Touch-Bar-Dienst. Über KDE (`org.kde.ScreenBrightness`) zuckt der
+Bildschirm nach jeder Touch-Bar-Änderung nach: KDE bemerkt den Touch-Bar-Wert
+nicht und animiert beim nächsten Setzen von seinem veralteten Wert aus.
+KDE-Aktionen erkennt der Dienst daran, dass der Kernelwert zum KDE-Wert passt:
+Ein Profilwechsel wird nicht gelernt, nach dem Abdunkeln geht es zurück zur
+Kennlinie, der KDE-Regler wird gelernt. Während KDE abdunkelt (ein Schritt auf
+0,3, Tastaturlicht aus), ruht die Regelung.
+
+Benötigt `python3-dbus`, `python3-gi` und `iio-sensor-proxy`:
+
+```bash
+install -D -m 0755 bin/als-brightness ~/.local/bin/als-brightness
+install -D -m 0644 systemd/als-brightness.service \
+  ~/.config/systemd/user/als-brightness.service
+systemctl --user daemon-reload
+systemctl --user enable --now als-brightness.service
+journalctl --user -u als-brightness -f
+```
+
+Beim ersten Start wird die aktuelle Helligkeit zur Vorliebe. Abschalten mit
+`systemctl --user disable --now als-brightness.service`.
+
+Hinweis: Der KDE-Regler kann einen anderen Wert zeigen als die echte
+Helligkeit, weil weder die Touch Bar noch dieser Dienst über KDE gehen.
