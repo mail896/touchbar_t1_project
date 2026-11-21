@@ -1,0 +1,452 @@
+#!/usr/bin/python3 -I
+"""Automatic display brightness from the ambient light sensor (MacBookPro14,2).
+
+Reads LightLevel from iio-sensor-proxy (system bus) and sets the backlight
+through logind (Session.SetBrightness), the same path the Touch Bar uses.
+Not through KDE: KDE does not pick up changes made by others and animates from
+its stale value on its next write, which shows as a visible twitch.
+KDE's own actions (profile switch, idle dimming, wake-up, KDE slider) are
+recognised by the kernel value matching KDE's value.
+
+- Curve: percent over log10(lux + 1), piecewise linear (CURVE).
+- Manual changes (Touch Bar, KDE slider) are learned as an offset to the curve
+  and stored in ~/.config/als-brightness.json.
+- Brightening follows after ~1 s, dimming only after ~4 s (a hand over the
+  sensor should not darken the screen). Transitions use a short ramp.
+- The sensor is released when the lid closes and before sleep.
+
+Disable: systemctl --user disable --now als-brightness.service
+"""
+import glob
+import json
+import math
+import os
+import sys
+import time
+
+import dbus
+import dbus.mainloop.glib
+from gi.repository import GLib
+
+STATE = os.path.expanduser("~/.config/als-brightness.json")
+# (log10(lux+1), percent)
+CURVE = [(0.0, 12.0), (1.0, 28.0), (2.0, 48.0), (3.0, 78.0), (3.6, 100.0)]
+MIN_PERCENT, MAX_PERCENT = 3.0, 100.0
+THRESHOLD = 3.0           # percentage points; smaller deviations are ignored
+BRIGHTEN_AFTER = 1        # seconds a deviation must last before brightening
+DIM_AFTER = 4             # seconds a deviation must last before dimming
+EMA_UP = 0.7              # smoothing in the log domain per second (brighter)
+EMA_DOWN = 0.5            # same (darker)
+RAMP_STEPS = 12
+RAMP_MS = 40
+# KDE idle dimming (Plasma 6.3.6, dimdisplay.cpp): one step, multiplier 0.3 on
+# the hardware value, KDE's value stays; keyboard backlight goes to 0.
+DIM_FACTOR = 0.3
+KEYBOARD = "/sys/class/leds/spi::kbd_backlight/brightness"
+QUIET_AFTER_SET = 0.5     # s, do not check the kernel value right after our write
+KDE_SIGNAL_WINDOW = 3.0   # s, kernel value = KDE value shortly after a KDE signal: slider
+PROFILE_WINDOW = 3.0      # s, KDE profile switch: not learned as a preference
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def curve(x):
+    if x <= CURVE[0][0]:
+        return CURVE[0][1]
+    for (x0, y0), (x1, y1) in zip(CURVE, CURVE[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return CURVE[-1][1]
+
+
+class Controller:
+    def __init__(self):
+        self.sys = dbus.SystemBus()
+        self.ses = dbus.SessionBus()
+        self.offset = self._load_offset()
+        self.logx = None          # smoothed log10(lux+1)
+        self.rawx = None          # last sensor value log10(lux+1)
+        self.active = False
+        self.applied = None       # last set/known brightness in %
+        self.deviating_for = 0    # seconds the target has deviated
+        self.ramp = None
+        self.max = 10000
+        self._display = None
+        self.last_set = 0.0
+        self.profile_time = -100.0
+        self.candidate = None     # (percent, time) KDE change, not learned yet
+        self.pending_hw = None    # foreign kernel value waiting to be stable
+        self.kde_signal_time = -100.0
+        self.dimmed = False
+        self._session = None
+        self.hw = None
+        self.hw_max = 0
+        self.no_sensor_logged = False
+        self.sleeping = False
+        self.ticks = 0
+        self._pick_backlight()
+
+        self.sys.add_signal_receiver(
+            self._sensor_changed, "PropertiesChanged",
+            "org.freedesktop.DBus.Properties", "net.hadess.SensorProxy",
+            "/net/hadess/SensorProxy")
+        self.sys.add_signal_receiver(
+            self._proxy_owner, "NameOwnerChanged", "org.freedesktop.DBus",
+            arg0="net.hadess.SensorProxy")
+        self.sys.add_signal_receiver(
+            self._prepare_sleep, "PrepareForSleep", "org.freedesktop.login1.Manager",
+            "org.freedesktop.login1", "/org/freedesktop/login1")
+        self.sys.add_signal_receiver(
+            self._logind_props, "PropertiesChanged",
+            "org.freedesktop.DBus.Properties", "org.freedesktop.login1",
+            "/org/freedesktop/login1")
+        self.ses.add_signal_receiver(
+            self._kde_brightness_changed, "BrightnessChanged",
+            "org.kde.ScreenBrightness", None, "/org/kde/ScreenBrightness")
+        for sig in ("profileChanged", "configurationReloaded"):
+            self.ses.add_signal_receiver(
+                self._profile, sig, "org.kde.Solid.PowerManagement", None,
+                "/org/kde/Solid/PowerManagement")
+        GLib.timeout_add_seconds(1, self._tick)
+
+    def _pick_backlight(self):
+        """Like KDE: firmware before platform before raw (6.12: acpi_video0)."""
+        rank = {"firmware": 0, "platform": 1, "raw": 2}
+        found = []
+        for d in glob.glob("/sys/class/backlight/*"):
+            try:
+                kind = open(d + "/type").read().strip()
+            except OSError:
+                kind = "raw"
+            found.append((rank.get(kind, 3), d))
+        if not found:
+            return False
+        self.hw = sorted(found)[0][1]
+        self.hw_max = int(open(self.hw + "/max_brightness").read())
+        log("Backlight:", self.hw)
+        return True
+
+    # ---- state ----------------------------------------------------------
+    def _load_offset(self):
+        try:
+            with open(STATE) as f:
+                return float(json.load(f)["offset"])
+        except Exception:
+            return None
+
+    def _save_offset(self):
+        try:
+            tmp = STATE + ".new"
+            with open(tmp, "w") as f:
+                json.dump({"offset": round(self.offset, 1)}, f)
+            os.replace(tmp, STATE)
+        except Exception as e:
+            log("Offset not saved:", e)
+
+    # ---- KDE brightness (read only) -------------------------------------
+    def display(self):
+        if self._display is None:
+            o = self.ses.get_object("org.kde.ScreenBrightness",
+                                    "/org/kde/ScreenBrightness")
+            names = o.Get("org.kde.ScreenBrightness", "DisplaysDBusNames",
+                          dbus_interface="org.freedesktop.DBus.Properties")
+            name = None
+            for n in names:
+                d = self.ses.get_object("org.kde.ScreenBrightness",
+                                        "/org/kde/ScreenBrightness/" + n)
+                if d.Get("org.kde.ScreenBrightness.Display", "IsInternal",
+                         dbus_interface="org.freedesktop.DBus.Properties"):
+                    name = n
+                    break
+            if name is None:
+                raise RuntimeError("no internal display")
+            self._display_name = name
+            self._display = self.ses.get_object(
+                "org.kde.ScreenBrightness", "/org/kde/ScreenBrightness/" + name)
+            self.max = int(self._display.Get(
+                "org.kde.ScreenBrightness.Display", "MaxBrightness",
+                dbus_interface="org.freedesktop.DBus.Properties"))
+        return self._display
+
+    def kde_percent(self):
+        v = self.display().Get("org.kde.ScreenBrightness.Display", "Brightness",
+                               dbus_interface="org.freedesktop.DBus.Properties")
+        return 100.0 * int(v) / self.max
+
+    # ---- hardware via logind --------------------------------------------
+    def session(self):
+        if self._session is None:
+            m = self.sys.get_object("org.freedesktop.login1",
+                                    "/org/freedesktop/login1")
+            u = m.GetUser(dbus.UInt32(os.getuid()),
+                          dbus_interface="org.freedesktop.login1.Manager")
+            sid, path = self.sys.get_object("org.freedesktop.login1", u).Get(
+                "org.freedesktop.login1.User", "Display",
+                dbus_interface="org.freedesktop.DBus.Properties")
+            self._session = self.sys.get_object("org.freedesktop.login1", path)
+        return self._session
+
+    def read_hw(self):
+        return int(open(self.hw + "/brightness").read())
+
+    def hw_value(self, p):
+        return max(1, int(round(self.hw_max * p / 100.0)))
+
+    def set_percent(self, p):
+        self.last_set = time.monotonic()
+        self.session().SetBrightness(
+            "backlight", os.path.basename(self.hw), dbus.UInt32(self.hw_value(p)),
+            dbus_interface="org.freedesktop.login1.Session")
+
+    def _kde_brightness_changed(self, name, value, source, context):
+        if self._display is not None and name != self._display_name:
+            return
+        p = 100.0 * int(value) / self.max
+        self.ramp = None
+        self.kde_signal_time = time.monotonic()
+        self.candidate = (p, self.kde_signal_time)
+
+    def _profile(self, *args):
+        self.profile_time = time.monotonic()
+
+    def _learn(self, p, source):
+        if self.logx is None:
+            return
+        self.offset = max(-100.0, min(100.0, p - curve(self.logx)))
+        self._save_offset()
+        log(f"Manual change ({source}) to {p:.0f} % at "
+            f"{10**self.logx - 1:.0f} lux -> offset {self.offset:+.1f}")
+
+    def _check_candidate(self):
+        if self.candidate is None:
+            return
+        p, t = self.candidate
+        if time.monotonic() - t < 1.5:
+            return
+        self.candidate = None
+        if abs(self.profile_time - t) < PROFILE_WINDOW:
+            log(f"KDE profile set {p:.0f} %, not learned")
+            return
+        self._learn(p, "KDE")
+
+    def _keyboard_off(self):
+        try:
+            return int(open(KEYBOARD).read()) == 0
+        except OSError:
+            return True
+
+    def _check_hw(self):
+        """Detect foreign changes of the kernel value.
+        - Touch Bar (t1-touchbar-hw, via logind): kernel value does not match
+          KDE's value -> adopt and learn, write nothing.
+        - KDE idle dimming: kernel value = 0.3 x KDE value and keyboard light
+          off -> control pauses.
+        - KDE writes itself (wake-up, profile, KDE slider): kernel value = KDE
+          value -> learn only after a KDE slider signal, else back to the curve."""
+        if not self.hw or self.ramp is not None:
+            return
+        if time.monotonic() - self.last_set < QUIET_AFTER_SET:
+            return
+        hw = self.read_hw()
+        if self.applied is None:        # start/wake-up: take the current value
+            self.applied = 100.0 * hw / self.hw_max
+            return
+        if abs(hw - self.hw_value(self.applied)) <= 1:
+            self.pending_hw = None
+            self.dimmed = False
+            return
+        kde_hw = self.kde_percent() / 100.0 * self.hw_max
+        if abs(hw - DIM_FACTOR * kde_hw) <= 1.5 and self._keyboard_off():
+            if not self.dimmed:
+                log("KDE dims the display, control pauses")
+            self.dimmed = True
+            self.pending_hw = None
+            return
+        if self.pending_hw != hw:
+            self.pending_hw = hw      # adopt only once stable for 1 s
+            return
+        self.pending_hw = None
+        self.dimmed = False
+        p = 100.0 * hw / self.hw_max
+        self.applied = p
+        self.deviating_for = 0
+        if abs(hw - kde_hw) <= 1.5:
+            self.candidate = None
+            if time.monotonic() - self.kde_signal_time > KDE_SIGNAL_WINDOW:
+                log(f"KDE set {p:.0f} % (wake-up), back to the curve")
+            elif abs(self.profile_time - self.kde_signal_time) < PROFILE_WINDOW:
+                log(f"KDE profile set {p:.0f} %, not learned")
+            else:
+                self._learn(p, "KDE slider")
+            return
+        self._learn(p, "Touch Bar")
+
+    # ---- sensor ---------------------------------------------------------
+    def proxy(self):
+        return self.sys.get_object("net.hadess.SensorProxy",
+                                   "/net/hadess/SensorProxy")
+
+    def claim(self):
+        if self.active:
+            return
+        try:
+            p = self.proxy()
+            if not p.Get("net.hadess.SensorProxy", "HasAmbientLight",
+                         dbus_interface="org.freedesktop.DBus.Properties"):
+                if not self.no_sensor_logged:
+                    log("No light sensor reported, retrying every 10 s")
+                    self.no_sensor_logged = True
+                return
+            p.ClaimLight(dbus_interface="net.hadess.SensorProxy")
+            self.active = True
+            self.no_sensor_logged = False
+            self.logx = None
+            self.rawx = None
+            self.deviating_for = 0
+            log("Light sensor claimed")
+        except dbus.DBusException as e:
+            log("ClaimLight failed:", e.get_dbus_message())
+
+    def release(self, reason):
+        if not self.active:
+            return
+        self.active = False
+        self.ramp = None
+        try:
+            self.proxy().ReleaseLight(dbus_interface="net.hadess.SensorProxy")
+        except dbus.DBusException:
+            pass
+        log("Light sensor released:", reason)
+
+    def _sensor_changed(self, iface, changed, invalidated):
+        if not self.active or "LightLevel" not in changed:
+            return
+        x = math.log10(max(0.0, float(changed["LightLevel"])) + 1.0)
+        self.rawx = x
+        if self.logx is None:
+            self.logx = x
+            if self.offset is None:
+                try:
+                    self.offset = 100.0 * self.read_hw() / self.hw_max - curve(x)
+                    self._save_offset()
+                    log(f"Initial offset {self.offset:+.1f}")
+                except Exception as e:
+                    log("Brightness not readable:", e)
+                    self.offset = 0.0
+
+    def _proxy_owner(self, name, old, new):
+        self.active = False
+        if new and not self.lid_closed():
+            GLib.timeout_add_seconds(2, lambda: (self.claim(), False)[1])
+
+    def lid_closed(self):
+        try:
+            l = self.sys.get_object("org.freedesktop.login1",
+                                    "/org/freedesktop/login1")
+            return bool(l.Get("org.freedesktop.login1.Manager", "LidClosed",
+                              dbus_interface="org.freedesktop.DBus.Properties"))
+        except dbus.DBusException:
+            return False
+
+    def _prepare_sleep(self, starting):
+        self.sleeping = bool(starting)
+        if starting:
+            self.release("sleep")
+        else:
+            GLib.timeout_add_seconds(3, self._after_sleep)
+
+    def _after_sleep(self):
+        if not self.lid_closed():
+            self.applied = None
+            self.claim()
+        return False
+
+    def _logind_props(self, iface, changed, invalidated):
+        if "LidClosed" in changed:
+            if changed["LidClosed"]:
+                self.release("lid closed")
+            else:
+                self.applied = None
+                self.claim()
+
+    # ---- control --------------------------------------------------------
+    def _tick(self):
+        self.ticks += 1
+        if self.ticks % 10 == 0:
+            # robustness at boot: backlight or sensor appeared after the service
+            if not self.hw:
+                self._pick_backlight()
+            if not self.active and not self.sleeping and not self.lid_closed():
+                self.claim()
+        try:
+            self._check_candidate()
+            self._check_hw()
+            self._control()
+        except dbus.DBusException as e:
+            log("D-Bus error:", e.get_dbus_message())
+            self._display = None
+            self._session = None
+        except Exception as e:
+            log("Error:", e)
+        return True
+
+    def _control(self):
+        if not self.active or self.logx is None or self.offset is None:
+            return
+        d = self.rawx - self.logx
+        self.logx += (EMA_UP if d > 0 else EMA_DOWN) * d
+        if self.ramp is not None or self.dimmed or self.pending_hw is not None:
+            self.deviating_for = 0
+            return
+        target = max(MIN_PERCENT, min(MAX_PERCENT, curve(self.logx) + self.offset))
+        if self.applied is None:
+            self.applied = 100.0 * self.read_hw() / self.hw_max
+        diff = target - self.applied
+        if abs(diff) < THRESHOLD:
+            self.deviating_for = 0
+            return
+        self.deviating_for += 1
+        if self.deviating_for < (BRIGHTEN_AFTER if diff > 0 else DIM_AFTER):
+            return
+        self.deviating_for = 0
+        hw = self.read_hw()
+        if abs(hw - self.hw_value(self.applied)) > 1:
+            return                    # foreign change, let _check_hw handle it
+        self._start_ramp(100.0 * hw / self.hw_max, target)
+
+    def _start_ramp(self, start, end):
+        self.ramp = [start + (end - start) * (i + 1) / RAMP_STEPS
+                     for i in range(RAMP_STEPS)]
+        GLib.timeout_add(RAMP_MS, self._ramp_step)
+
+    def _ramp_step(self):
+        if not self.ramp:
+            self.ramp = None
+            return False
+        p = self.ramp.pop(0)
+        try:
+            self.set_percent(p)
+            self.applied = p
+        except dbus.DBusException as e:
+            log("Setting failed:", e.get_dbus_message())
+            self._session = None
+            self.ramp = None
+            return False
+        if not self.ramp:
+            self.ramp = None
+            return False
+        return True
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    c = Controller()
+    if not c.lid_closed():
+        c.claim()
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
