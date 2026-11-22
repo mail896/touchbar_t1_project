@@ -310,3 +310,19 @@ Beim ersten Start wird die aktuelle Helligkeit zur Vorliebe. Abschalten mit
 
 Hinweis: Der KDE-Regler kann einen anderen Wert zeigen als die echte
 Helligkeit, weil weder die Touch Bar noch dieser Dienst über KDE gehen.
+
+## Schlafverbrauch auf Akku messen
+
+`tools/battery-logger.py` liest `BAT0` alle 2 s und erkennt jede Schlafphase
+am Sprung in CLOCK_BOOTTIME. Es endet eine wählbare Zeit nach dem letzten
+Aufwachen und zeichnet so auch einen suspend-then-hibernate-Zyklus mit zwei
+Phasen vollständig auf:
+
+```bash
+python3 -I tools/battery-logger.py schlaf.jsonl 900
+```
+
+Starten, 10 min warten, Deckel zu, nach dem Aufwachen das Gerät für den
+Nachlauf in Ruhe lassen. Der Ladezähler springt auf diesem Gerät nach längerer
+Ruhe (gesehen: +64 mAh in 3 min nach dem Wecken). Darum Fenster erst nach dem
+Einschwingen vergleichen und mindestens 2 h messen.

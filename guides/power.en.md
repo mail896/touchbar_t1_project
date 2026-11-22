@@ -298,3 +298,18 @@ On the first start the current brightness becomes the preference. Disable with
 
 Note: KDE's slider may show a different value than the real brightness, since
 neither the Touch Bar nor this service go through KDE.
+
+## Measuring sleep power on battery
+
+`tools/battery-logger.py` samples `BAT0` every 2 s and detects each sleep
+phase from the CLOCK_BOOTTIME gap. It stops a given time after the last wake,
+so a suspend-then-hibernate cycle with two phases is recorded in full:
+
+```bash
+python3 -I tools/battery-logger.py sleep.jsonl 900
+```
+
+Start it, wait 10 min, close the lid, and leave the machine alone for the
+post-run after waking. The charge counter on this machine jumps after a long
+rest (seen: +64 mAh within 3 min of waking), so compare windows after it has
+settled and measure for at least 2 h.
