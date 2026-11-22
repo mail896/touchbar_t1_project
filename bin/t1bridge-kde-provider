@@ -17,6 +17,19 @@ volume_state() {
         END { if (!found) exit 1 }'
 }
 
+display_power() {
+    # Use the laptop panel's power state rather than its brightness level.
+    for connector in /sys/class/drm/card*-eDP-*/dpms; do
+        [ -r "$connector" ] || continue
+        IFS= read -r mode < "$connector" || continue
+        case "$mode" in
+            On) printf '%s\n' 1; return 0 ;;
+            Off|Standby|Suspend) printf '%s\n' 0; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 battery_status() {
     plugged=0
     for online_path in /sys/class/power_supply/*/online; do
@@ -95,10 +108,15 @@ case "${2:-}" in
            [ -n "$players" ]; then
             capabilities=$((capabilities | 2))
         fi
-        if state=$(volume_state "$sink"); then
-            printf 'T1BRIDGE-DESKTOP 1 %s %s\n' "$((capabilities | 1))" "$state"
+        if audio=$(volume_state "$sink"); then
+            capabilities=$((capabilities | 1))
         else
-            printf 'T1BRIDGE-DESKTOP 1 %s - -\n' "$capabilities"
+            audio='- -'
+        fi
+        if display=$(display_power); then
+            printf 'T1BRIDGE-DESKTOP 1 %s %s %s\n' "$((capabilities | 16))" "$audio" "$display"
+        else
+            printf 'T1BRIDGE-DESKTOP 1 %s %s\n' "$capabilities" "$audio"
         fi
         if [ "$2" = status-with-battery ]; then
             battery_status
