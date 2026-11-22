@@ -265,22 +265,30 @@ Der Kernel filtert dann selbst. In rEFInd verhindert `graphics on` im
 
 Der Umgebungslichtsensor hängt als HID-Sensor (`05AC:8600`) an der T1.
 Debian lädt `hid_sensor_als`, und `iio-sensor-proxy` meldet ihn über D-Bus.
-Plasma 6.3 nutzt ihn nicht. `als-brightness` ist ein kleiner Benutzerdienst:
+Plasma 6.3 nutzt ihn nicht. `als-brightness` ist ein kleiner Benutzerdienst mit
+zwei Modi, festgehalten in `~/.config/als-brightness.mode`:
 
-- Er bildet Lux über eine logarithmische Kennlinie auf Prozent ab.
-- Eine Änderung per Touch Bar oder KDE-Regler lernt er als Versatz zur
-  Kennlinie (`~/.config/als-brightness.json`).
-- Heller regelt er nach etwa 1 s, dunkler erst nach etwa 4 s.
-- Beim Zuklappen und vor dem Schlaf gibt er den Sensor frei.
+- **AUTO**: Die Helligkeit folgt dem Licht über eine logarithmische Kennlinie
+  (unter etwa 5 lux flach, dort rauscht der Sensor). Beim Einschalten von AUTO
+  gilt die gerade eingestellte Helligkeit beim aktuellen Licht als
+  Ausgangspunkt. Danach wird nichts gelernt. Heller regelt er nach etwa 1 s,
+  dunkler nach etwa 4 s, und nur bei deutlicher Lichtänderung.
+- **Manuell**: Der Dienst tut nichts und gibt den Sensor frei.
 
-Er schreibt die Helligkeit über logind (`Session.SetBrightness`), auf demselben
-Weg wie der Touch-Bar-Dienst. Über KDE (`org.kde.ScreenBrightness`) zuckt der
-Bildschirm nach jeder Touch-Bar-Änderung nach: KDE bemerkt den Touch-Bar-Wert
-nicht und animiert beim nächsten Setzen von seinem veralteten Wert aus.
-KDE-Aktionen erkennt der Dienst daran, dass der Kernelwert zum KDE-Wert passt:
-Ein Profilwechsel wird nicht gelernt, nach dem Abdunkeln geht es zurück zur
-Kennlinie, der KDE-Regler wird gelernt. Während KDE abdunkelt (ein Schritt auf
-0,3, Tastaturlicht aus), ruht die Regelung.
+Die Sonne links im Helligkeitsregler der Touch Bar ist der Schalter: blau
+gefüllt bei AUTO, weiß bei manuell. Ziehen am Regler oder die Helligkeitstasten
+schalten auf manuell. Das braucht den Renderer aus `renderer.patch`; ohne
+Modusdatei bleibt die Sonne ein reines Symbol. Auch der KDE-Regler schaltet auf
+manuell.
+
+Der Dienst schreibt die Helligkeit über logind (`Session.SetBrightness`), auf
+demselben Weg wie der Touch-Bar-Dienst. Über KDE (`org.kde.ScreenBrightness`)
+zuckt der Bildschirm nach jeder Touch-Bar-Änderung nach: KDE bemerkt den
+Touch-Bar-Wert nicht und animiert beim nächsten Setzen von seinem veralteten
+Wert aus. Seinen alten Wert schreibt KDE trotzdem selbst zurück, beim
+Profilwechsel zwischen Netzteil und Akku und beim Aufwachen aus dem Abdunkeln;
+in AUTO stellt der Dienst dann binnen etwa 0,3 s den Kennlinienwert wieder her.
+Während KDE abdunkelt (ein Schritt auf 0,3, Tastaturlicht aus), ruht er.
 
 Benötigt `python3-dbus`, `python3-gi` und `iio-sensor-proxy`:
 
@@ -293,8 +301,8 @@ systemctl --user enable --now als-brightness.service
 journalctl --user -u als-brightness -f
 ```
 
-Für einen Menüeintrag, der den Dienst ein- und ausschaltet (mit kurzer
-Meldung; die Wahl bleibt über Neustarts erhalten):
+Ein Menüeintrag schaltet ebenfalls zwischen AUTO und manuell um, mit kurzer
+Meldung:
 
 ```bash
 install -D -m 0755 bin/als-brightness-toggle ~/.local/bin/als-brightness-toggle
@@ -302,10 +310,7 @@ install -D -m 0644 desktop/als-brightness-toggle.desktop \
   ~/.local/share/applications/als-brightness-toggle.desktop
 ```
 
-„Auto-Helligkeit ein/aus“ lässt sich dann ins Panel legen oder mit einem
-Tastenkürzel belegen. Rechtsklick bietet „Einschalten“ und „Ausschalten“.
-
-Beim ersten Start wird die aktuelle Helligkeit zur Vorliebe. Abschalten mit
+Den Dienst abschalten mit
 `systemctl --user disable --now als-brightness.service`.
 
 Hinweis: Der KDE-Regler kann einen anderen Wert zeigen als die echte

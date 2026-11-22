@@ -87,6 +87,42 @@ index 32669af..9f10836 100644
  t1-touchbar-hw = { path = "../t1-touchbar-hw", version = "=0.0.0", default-features = false }
  
  [lints]
+diff --git a/crates/t1-touchbar/src/auto_brightness.rs b/crates/t1-touchbar/src/auto_brightness.rs
+new file mode 100644
+index 0000000..9c310b4
+--- /dev/null
++++ b/crates/t1-touchbar/src/auto_brightness.rs
+@@ -0,0 +1,30 @@
++//! Shared AUTO/manual mode of the automatic display brightness service.
++//!
++//! The mode lives in `~/.config/als-brightness.mode` ("auto" or "manual"). The
++//! brightness service, its menu toggle and this renderer read and write it.
++//! Without the file the service is not set up and no AUTO button is shown.
++
++use std::{env, fs, io::Write, path::PathBuf};
++
++fn path() -> Option<PathBuf> {
++    let home = env::var_os("HOME")?;
++    Some(PathBuf::from(home).join(".config/als-brightness.mode"))
++}
++
++/// Returns `Some(true)` for AUTO, `Some(false)` for manual, `None` without file.
++pub fn read() -> Option<bool> {
++    let text = fs::read_to_string(path()?).ok()?;
++    Some(text.trim() != "manual")
++}
++
++/// Atomically stores the mode. Returns whether it was written.
++pub fn write(auto: bool) -> bool {
++    let Some(path) = path() else {
++        return false;
++    };
++    let temporary = path.with_extension("mode.new");
++    fs::File::create(&temporary)
++        .and_then(|mut file| file.write_all(if auto { b"auto\n" } else { b"manual\n" }))
++        .and_then(|()| fs::rename(&temporary, &path))
++        .is_ok()
++}
 diff --git a/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs b/crates/t1-touchbar/src/bin/t1-touchbar-kde.rs
 new file mode 100644
 index 0000000..7ac09e2
@@ -211,10 +247,10 @@ index 0000000..7ac09e2
 +    ExitCode::from(2)
 +}
 diff --git a/crates/t1-touchbar/src/builtin_renderer.rs b/crates/t1-touchbar/src/builtin_renderer.rs
-index 90cead9..2d04c01 100644
+index 90cead9..9deb3d5 100644
 --- a/crates/t1-touchbar/src/builtin_renderer.rs
 +++ b/crates/t1-touchbar/src/builtin_renderer.rs
-@@ -1,30 +1,39 @@
+@@ -1,30 +1,40 @@
 -//! Production built-in renderer for the first private Touch Bar cutover.
 +//! Production built-in renderer for the Touch Bar.
  
@@ -244,6 +280,7 @@ index 90cead9..2d04c01 100644
  };
  
 -use crate::desktop_provider::{DesktopAction, DesktopCapabilities, DesktopProvider, DesktopState};
++use crate::auto_brightness;
 +use crate::cpu_usage::CoreUsage;
 +use crate::desktop_provider::{
 +    DesktopAction, DesktopCapabilities, DesktopProvider, DesktopState, resolve_provider_path,
@@ -261,7 +298,7 @@ index 90cead9..2d04c01 100644
  use crate::touch_id_overlay::TouchIdOverlay;
  
  const BUFFER_ID: u32 = 1;
-@@ -40,6 +49,13 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
+@@ -40,6 +50,13 @@ const HOLD_REPEAT_DELAY: Duration = Duration::from_millis(350);
  const HOLD_REPEAT_INTERVAL: Duration = Duration::from_millis(90);
  const OVERLAY_FADE_DURATION: Duration = Duration::from_millis(150);
  const ENROLLMENT_PROGRESS_DURATION: Duration = Duration::from_millis(220);
@@ -275,7 +312,7 @@ index 90cead9..2d04c01 100644
  
  /// Static, redaction-safe failure from one hardware-service connection.
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -71,13 +87,44 @@ impl std::error::Error for BuiltinRendererError {}
+@@ -71,13 +88,44 @@ impl std::error::Error for BuiltinRendererError {}
  
  /// Runs the built-in renderer and reconnects forever with capped backoff.
  pub fn run_forever(provider_path: Option<&Path>) {
@@ -322,7 +359,7 @@ index 90cead9..2d04c01 100644
          ) {
              eprintln!("t1-touchbar: {error}; reconnecting");
          }
-@@ -90,7 +137,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
+@@ -90,7 +138,10 @@ fn next_reconnect_delay(delay: Duration) -> Duration {
      delay.saturating_mul(2).min(MAX_RECONNECT_DELAY)
  }
  
@@ -334,7 +371,7 @@ index 90cead9..2d04c01 100644
      let NegotiatedConnection {
          mut connection,
          request_ids,
-@@ -102,7 +152,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+@@ -102,7 +153,7 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
      let mut session = RendererSession::new(
          dimensions,
          request_ids,
@@ -343,7 +380,7 @@ index 90cead9..2d04c01 100644
      )?;
      session.register(&connection)?;
      let overlay_watcher = OverlayWatcher::start();
-@@ -114,6 +164,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
+@@ -114,6 +165,17 @@ fn run_once(provider: Option<&DesktopProvider>) -> Result<(), BuiltinRendererErr
              session.set_desktop_state(state)?;
              session.submit_if_ready(&connection)?;
          }
@@ -361,7 +398,7 @@ index 90cead9..2d04c01 100644
          if let Some(observation) = overlay_watcher.take_latest() {
              let overlay = observation.overlay();
              session.set_overlay(
-@@ -321,6 +382,7 @@ enum PendingRequest {
+@@ -321,6 +383,7 @@ enum PendingRequest {
      TapKeys,
      CancelTouchId,
      HardwareAction(Option<DesktopAction>),
@@ -369,12 +406,14 @@ index 90cead9..2d04c01 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -339,6 +401,16 @@ struct RendererSession {
+@@ -339,6 +402,18 @@ struct RendererSession {
      pending_desktop_state: Option<DesktopState>,
      display_off: bool,
      levels: StockLevels,
 +    brightness: SystemBrightnessControls,
 +    sliders: [SliderState; 3],
++    auto_brightness: Option<bool>,
++    next_auto_read: Duration,
 +    slider_panel_deadline: Option<Duration>,
 +    desktop_launcher: Option<Child>,
 +    totp_preview: Option<TotpPreview>,
@@ -386,12 +425,14 @@ index 90cead9..2d04c01 100644
      touch_id: TouchIdOverlay,
      overlay_state: Option<OverlayState>,
      overlay_visual_state: Option<OverlayState>,
-@@ -390,6 +462,16 @@ impl RendererSession {
+@@ -390,6 +465,18 @@ impl RendererSession {
              pending_desktop_state: None,
              display_off: false,
              levels: StockLevels::default(),
 +            brightness: SystemBrightnessControls::discover(),
 +            sliders: [SliderState::default(); 3],
++            auto_brightness: None,
++            next_auto_read: Duration::ZERO,
 +            slider_panel_deadline: None,
 +            desktop_launcher: None,
 +            totp_preview: None,
@@ -403,7 +444,7 @@ index 90cead9..2d04c01 100644
              touch_id,
              overlay_state: None,
              overlay_visual_state: None,
-@@ -463,6 +545,13 @@ impl RendererSession {
+@@ -463,6 +550,13 @@ impl RendererSession {
                  if !in_flight.acknowledged || release.frame_id != in_flight.frame_id {
                      return Err(BuiltinRendererError::Protocol);
                  }
@@ -417,7 +458,7 @@ index 90cead9..2d04c01 100644
                  self.in_flight = None;
                  self.submit_if_ready(connection)
              }
-@@ -472,6 +561,19 @@ impl RendererSession {
+@@ -472,6 +566,22 @@ impl RendererSession {
                  }
                  let outcome = self.observe_input(frame)?;
                  self.dirty |= outcome.redraw;
@@ -427,6 +468,9 @@ index 90cead9..2d04c01 100644
 +                if let Some((control, level)) = outcome.slider_level
 +                    && *slider_level(&mut self.levels, control) != Some(level)
 +                {
++                    if control == SliderControl::DisplayBrightness {
++                        self.mark_manual_brightness();
++                    }
 +                    self.sliders[slider_index(control)].desired = Some(level);
 +                    *slider_level(&mut self.levels, control) = Some(level);
 +                    self.dirty = true;
@@ -437,7 +481,7 @@ index 90cead9..2d04c01 100644
                  for action in outcome.actions {
                      self.dispatch(action, connection, provider)?;
                  }
-@@ -525,6 +627,17 @@ impl RendererSession {
+@@ -525,6 +635,17 @@ impl RendererSession {
                  ));
                  Ok(())
              }
@@ -455,7 +499,7 @@ index 90cead9..2d04c01 100644
              PendingRequest::TapKeys => Ok(()),
              PendingRequest::Register => Err(BuiltinRendererError::Protocol),
          }
-@@ -551,6 +664,7 @@ impl RendererSession {
+@@ -551,6 +672,7 @@ impl RendererSession {
          match pending {
              PendingRequest::TapKeys
              | PendingRequest::CancelTouchId
@@ -463,7 +507,7 @@ index 90cead9..2d04c01 100644
              | PendingRequest::HardwareAction(_) => {
                  eprintln!("t1-touchbar: typed action was rejected");
                  Ok(())
-@@ -572,6 +686,11 @@ impl RendererSession {
+@@ -572,6 +694,11 @@ impl RendererSession {
          &mut self,
          mut frame: WireInputFrame,
      ) -> Result<InputOutcome, BuiltinRendererError> {
@@ -475,9 +519,13 @@ index 90cead9..2d04c01 100644
          if self.display_off || self.input.wait_for_touch_release {
              self.input.wait_for_touch_release = frame.contacts.iter().any(|contact| contact.tip);
              frame.contacts.clear();
-@@ -635,31 +754,18 @@ impl RendererSession {
+@@ -634,32 +761,22 @@ impl RendererSession {
+         if let Some(key) = action_key(action) {
              return self.send_keys(&[key], connection);
          }
++        if matches!(action, StockAction::StepDisplayBrightness(_)) {
++            self.mark_manual_brightness();
++        }
          match action {
 -            StockAction::StepDisplayBrightness(direction) => {
 -                let feedback = self
@@ -518,7 +566,7 @@ index 90cead9..2d04c01 100644
                  self.levels.muted = !self.levels.muted;
                  self.dirty = true;
                  dispatch_desktop(provider, DesktopAction::ToggleMute);
-@@ -688,10 +794,88 @@ impl RendererSession {
+@@ -688,10 +805,92 @@ impl RendererSession {
                  dispatch_desktop(provider, DesktopAction::MediaNext);
                  Ok(())
              }
@@ -529,6 +577,10 @@ index 90cead9..2d04c01 100644
 +            | StockAction::OpenShortcutOne
 +            | StockAction::OpenShortcutTwo => {
 +                self.launch_desktop_action(action);
++                Ok(())
++            }
++            StockAction::ToggleAutoBrightness => {
++                self.toggle_auto_brightness();
 +                Ok(())
 +            }
 +            StockAction::OpenSlider(control) => {
@@ -607,7 +659,7 @@ index 90cead9..2d04c01 100644
      fn send_hardware_action(
          &mut self,
          action: ClientMessage,
-@@ -789,6 +973,9 @@ impl RendererSession {
+@@ -789,6 +988,9 @@ impl RendererSession {
      }
  
      fn set_overlay(&mut self, state: Option<OverlayState>, progress: Option<u8>) {
@@ -617,7 +669,7 @@ index 90cead9..2d04c01 100644
          if self.overlay_state == state && self.enrollment_progress == progress {
              return;
          }
-@@ -832,6 +1019,43 @@ impl RendererSession {
+@@ -832,6 +1034,44 @@ impl RendererSession {
          self.now = now;
          self.advance_overlay_fade(now);
          self.advance_enrollment_progress(now);
@@ -654,6 +706,7 @@ index 90cead9..2d04c01 100644
 +            .contains(StockCapabilities::EXTENDED_CONTROLS)
 +            && !self.display_off
 +        {
++            self.poll_auto_brightness();
 +            for control in SLIDER_CONTROLS {
 +                self.advance_slider(control, connection, provider)?;
 +            }
@@ -661,7 +714,7 @@ index 90cead9..2d04c01 100644
          if !self.display_off
              && !self.input.wait_for_touch_release
              && let Some(action) = self.input.take_repeat(now)
-@@ -841,6 +1065,173 @@ impl RendererSession {
+@@ -841,6 +1081,203 @@ impl RendererSession {
          self.submit_if_ready(connection)
      }
  
@@ -809,6 +862,36 @@ index 90cead9..2d04c01 100644
 +        }
 +    }
 +
++    /// A manual brightness change ends AUTO (shared with the brightness service).
++    fn mark_manual_brightness(&mut self) {
++        if self.auto_brightness == Some(true) && auto_brightness::write(false) {
++            self.set_auto_brightness(Some(false));
++        }
++    }
++
++    fn toggle_auto_brightness(&mut self) {
++        let next = self.auto_brightness != Some(true);
++        if auto_brightness::write(next) {
++            self.set_auto_brightness(Some(next));
++        }
++    }
++
++    fn poll_auto_brightness(&mut self) {
++        if self.now < self.next_auto_read {
++            return;
++        }
++        self.next_auto_read = self.now + BRIGHTNESS_READ_INTERVAL;
++        let state = auto_brightness::read();
++        if state != self.auto_brightness || state != self.stock.auto_brightness() {
++            self.set_auto_brightness(state);
++        }
++    }
++
++    fn set_auto_brightness(&mut self, state: Option<bool>) {
++        self.auto_brightness = state;
++        self.set_stock_panel(self.stock.with_auto_brightness(state));
++    }
++
 +    fn set_slider_panel(&mut self, open: Option<SliderControl>) {
 +        self.set_stock_panel(self.stock.with_tools(false).with_open_slider(open));
 +    }
@@ -835,7 +918,7 @@ index 90cead9..2d04c01 100644
      fn advance_overlay_fade(&mut self, now: Duration) {
          if self.overlay_opacity == self.overlay_target_opacity {
              return;
-@@ -888,22 +1279,32 @@ impl RendererSession {
+@@ -888,22 +1325,32 @@ impl RendererSession {
          self.dirty = true;
      }
  
@@ -874,14 +957,15 @@ index 90cead9..2d04c01 100644
              return Ok(());
          }
          if !self.input.is_idle() {
-@@ -930,17 +1331,36 @@ impl RendererSession {
+@@ -930,17 +1377,37 @@ impl RendererSession {
              self.dimensions.height(),
              capabilities,
          )
 -        .map_err(|_| BuiltinRendererError::Negotiation)?;
 +        .map_err(|_| BuiltinRendererError::Negotiation)?
 +        .with_open_slider(self.stock.open_slider())
-+        .with_tools(self.stock.tools_open());
++        .with_tools(self.stock.tools_open())
++        .with_auto_brightness(self.stock.auto_brightness());
          self.stock = stock;
          self.input.set_stock(stock);
 -        self.levels.volume = state.volume;
@@ -914,7 +998,7 @@ index 90cead9..2d04c01 100644
      fn allocate_request(&mut self, kind: PendingRequest) -> Result<u32, BuiltinRendererError> {
          if self.pending.len() >= MAX_PENDING_REQUESTS {
              return Err(BuiltinRendererError::Protocol);
-@@ -960,6 +1380,188 @@ impl RendererSession {
+@@ -960,6 +1427,188 @@ impl RendererSession {
      }
  }
  
@@ -1103,7 +1187,7 @@ index 90cead9..2d04c01 100644
  const fn wire_step(direction: StepDirection) -> WireStepDirection {
      match direction {
          StepDirection::Down => WireStepDirection::Down,
-@@ -1007,6 +1609,8 @@ struct InputOutcome {
+@@ -1007,6 +1656,8 @@ struct InputOutcome {
      redraw: bool,
      actions: Vec<StockAction>,
      cancel_touch_id: bool,
@@ -1112,7 +1196,7 @@ index 90cead9..2d04c01 100644
  }
  
  struct InputInterpreter {
-@@ -1018,6 +1622,7 @@ struct InputInterpreter {
+@@ -1018,6 +1669,7 @@ struct InputInterpreter {
      pressed: Option<StockAction>,
      repeat: Option<RepeatState>,
      suppress_tap: Option<StockAction>,
@@ -1120,7 +1204,7 @@ index 90cead9..2d04c01 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -1042,6 +1647,7 @@ impl InputInterpreter {
+@@ -1042,6 +1694,7 @@ impl InputInterpreter {
              pressed: None,
              repeat: None,
              suppress_tap: None,
@@ -1128,7 +1212,7 @@ index 90cead9..2d04c01 100644
          })
      }
  
-@@ -1053,6 +1659,10 @@ impl InputInterpreter {
+@@ -1053,6 +1706,10 @@ impl InputInterpreter {
          self.pressed
      }
  
@@ -1139,7 +1223,7 @@ index 90cead9..2d04c01 100644
      fn is_idle(&self) -> bool {
          !self.wait_for_touch_release && self.gestures.is_idle()
      }
-@@ -1092,9 +1702,10 @@ impl InputInterpreter {
+@@ -1092,9 +1749,10 @@ impl InputInterpreter {
          let pressed = contacts
              .first()
              .filter(|contact| {
@@ -1153,7 +1237,7 @@ index 90cead9..2d04c01 100644
              })
              .and_then(|contact| self.stock.action_at(*contact, self.fn_pressed));
          redraw |= self.pressed != pressed;
-@@ -1118,9 +1729,60 @@ impl InputInterpreter {
+@@ -1118,9 +1776,60 @@ impl InputInterpreter {
              .gestures
              .ingest_frame(Duration::from_nanos(frame.monotonic_ns), &contacts)
              .map_err(|_| BuiltinRendererError::Gesture)?;
@@ -1214,7 +1298,7 @@ index 90cead9..2d04c01 100644
              if matches!(
                  gesture,
                  crate::gesture::Gesture::DragStart(_) | crate::gesture::Gesture::Drag { .. }
-@@ -1161,11 +1823,13 @@ impl InputInterpreter {
+@@ -1161,11 +1870,13 @@ impl InputInterpreter {
                  actions.push(action);
              }
          }
@@ -1230,7 +1314,7 @@ index 90cead9..2d04c01 100644
      }
  
      fn take_repeat(&mut self, now: Duration) -> Option<StockAction> {
-@@ -1187,6 +1851,7 @@ impl InputInterpreter {
+@@ -1187,6 +1898,7 @@ impl InputInterpreter {
          self.wait_for_touch_release |= !self.gestures.is_idle();
          self.gestures.cancel_all();
          self.pressed = None;
@@ -1238,7 +1322,7 @@ index 90cead9..2d04c01 100644
          self.cancel_repeat();
      }
  }
-@@ -1230,7 +1895,18 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
+@@ -1230,7 +1942,19 @@ const fn action_key(action: StockAction) -> Option<KeyCode> {
          | StockAction::StepVolume(_)
          | StockAction::MediaPrevious
          | StockAction::MediaPlayPause
@@ -1254,11 +1338,12 @@ index 90cead9..2d04c01 100644
 +        | StockAction::OpenSystemMonitor
 +        | StockAction::OpenPowerSettings
 +        | StockAction::OpenShortcutOne
-+        | StockAction::OpenShortcutTwo => return None,
++        | StockAction::OpenShortcutTwo
++        | StockAction::ToggleAutoBrightness => return None,
      })
  }
  
-@@ -1411,6 +2087,7 @@ mod tests {
+@@ -1411,6 +2135,7 @@ mod tests {
              volume: Some(61),
              muted: true,
              display_off: false,
@@ -1266,7 +1351,7 @@ index 90cead9..2d04c01 100644
          };
          session
              .set_desktop_state(state)
-@@ -1454,6 +2131,7 @@ mod tests {
+@@ -1454,6 +2179,7 @@ mod tests {
              volume: Some(42),
              muted: false,
              display_off: false,
@@ -1274,7 +1359,7 @@ index 90cead9..2d04c01 100644
          };
          session
              .set_desktop_state(state)
-@@ -1484,6 +2162,7 @@ mod tests {
+@@ -1484,6 +2210,7 @@ mod tests {
              volume: Some(50),
              muted: false,
              display_off: false,
@@ -1282,7 +1367,7 @@ index 90cead9..2d04c01 100644
          };
          session
              .set_desktop_state(state)
-@@ -1842,6 +2521,8 @@ mod tests {
+@@ -1842,6 +2569,8 @@ mod tests {
                  redraw: true,
                  actions: Vec::new(),
                  cancel_touch_id: false,
@@ -1291,7 +1376,7 @@ index 90cead9..2d04c01 100644
              }
          );
          assert!(interpreter.fn_pressed());
-@@ -1861,6 +2542,146 @@ mod tests {
+@@ -1861,6 +2590,146 @@ mod tests {
          );
      }
  
@@ -1438,7 +1523,7 @@ index 90cead9..2d04c01 100644
      #[test]
      fn escape_remains_active_without_fn_and_function_regions_do_not() {
          let mut interpreter = new_interpreter();
-@@ -2095,6 +2916,14 @@ mod tests {
+@@ -2095,6 +2964,14 @@ mod tests {
          assert_eq!(ids.next(&pending), Ok(2));
      }
  
@@ -2222,12 +2307,13 @@ index 315fce7..47b8730 100644
      fn provider_path_requires_an_absolute_executable_file() {
          let executable = std::env::current_exe().expect("current test executable");
 diff --git a/crates/t1-touchbar/src/lib.rs b/crates/t1-touchbar/src/lib.rs
-index 43722b7..9f34871 100644
+index 43722b7..5c7deca 100644
 --- a/crates/t1-touchbar/src/lib.rs
 +++ b/crates/t1-touchbar/src/lib.rs
-@@ -1,9 +1,11 @@
+@@ -1,9 +1,12 @@
  //! Unprivileged Touch Bar rendering and optional desktop integration.
  
++mod auto_brightness;
  pub mod builtin_renderer;
 +mod cpu_usage;
  pub mod desktop_provider;
@@ -2237,7 +2323,7 @@ index 43722b7..9f34871 100644
  mod overlay_labels;
  pub mod overlay_state;
  pub mod renderer_launcher;
-@@ -11,4 +13,5 @@ mod stock_art;
+@@ -11,4 +14,5 @@ mod stock_art;
  mod stock_icons;
  mod stock_labels;
  pub mod stock_slice;
@@ -2291,10 +2377,10 @@ index 0000000..7ba3ef2
 +    Ok(())
 +}
 diff --git a/crates/t1-touchbar/src/stock_art.rs b/crates/t1-touchbar/src/stock_art.rs
-index ad49165..1b80a2b 100644
+index ad49165..a546b6a 100644
 --- a/crates/t1-touchbar/src/stock_art.rs
 +++ b/crates/t1-touchbar/src/stock_art.rs
-@@ -7,19 +7,39 @@ use crate::stock_labels::AlphaMask;
+@@ -7,19 +7,40 @@ use crate::stock_labels::AlphaMask;
  const SAMPLE_GRID: u32 = 4;
  const SAMPLE_COUNT: u32 = SAMPLE_GRID * SAMPLE_GRID;
  const NATIVE_PLATE_HEIGHT: u32 = 60;
@@ -2314,6 +2400,7 @@ index ad49165..1b80a2b 100644
      DisplayDown,
      DisplayUp,
 +    Sun,
++    SunAuto,
 +    KeyboardLight,
      KeyboardDown,
      KeyboardUp,
@@ -2334,11 +2421,14 @@ index ad49165..1b80a2b 100644
  }
  
  pub(crate) fn draw_rounded_plate(
-@@ -94,18 +114,431 @@ pub(crate) fn draw_symbol(
+@@ -94,18 +115,439 @@ pub(crate) fn draw_symbol(
      let mask = match symbol {
          Symbol::DisplayDown => stock_icons::DISPLAY_DOWN,
          Symbol::DisplayUp => stock_icons::DISPLAY_UP,
 +        Symbol::Sun => return draw_outline_symbol(frame, bounds, color, is_sun_pixel),
++        Symbol::SunAuto => {
++            return draw_outline_symbol(frame, bounds, color, is_auto_sun_pixel);
++        }
 +        Symbol::KeyboardLight => {
 +            return draw_outline_symbol(frame, bounds, color, is_keyboard_light_pixel);
 +        }
@@ -2405,6 +2495,11 @@ index ad49165..1b80a2b 100644
 +        )
 +    });
 +    frame.blend_mask(bounds, &mask, color)
++}
++
++/// The sun with a filled disc: automatic brightness is on.
++fn is_auto_sun_pixel(x: f64, y: f64) -> bool {
++    x.hypot(y) <= 0.25 || is_sun_pixel(x, y)
 +}
 +
 +fn is_sun_pixel(x: f64, y: f64) -> bool {
@@ -2767,10 +2862,10 @@ index ad49165..1b80a2b 100644
      u32::try_from(
          (u64::from(native) * u64::from(plate_height)).div_ceil(u64::from(NATIVE_PLATE_HEIGHT)),
 diff --git a/crates/t1-touchbar/src/stock_slice.rs b/crates/t1-touchbar/src/stock_slice.rs
-index 4c0ae87..7de1a20 100644
+index 4c0ae87..7cfc996 100644
 --- a/crates/t1-touchbar/src/stock_slice.rs
 +++ b/crates/t1-touchbar/src/stock_slice.rs
-@@ -4,16 +4,37 @@ use std::{error::Error, fmt};
+@@ -4,16 +4,39 @@ use std::{error::Error, fmt};
  
  use crate::framebuffer::{FramebufferError, Rectangle, Rgb, Xrgb8888Frame};
  use crate::gesture::{DisplayContact, Gesture};
@@ -2803,6 +2898,8 @@ index 4c0ae87..7de1a20 100644
 +const MAIN_SLIDER_LEFT: u32 = 194;
 +const PANEL_SLIDER_LEFT: u32 = 390;
 +const MAIN_SLIDER_WIDTH: u32 = 600;
++/// The sun in front of the display slider track toggles AUTO brightness.
++const AUTO_SWITCH_WIDTH: u32 = 86;
 +const PANEL_SLIDER_WIDTH: u32 = 680;
 +const BATTERY_LEFT: u32 = 810;
 +const BATTERY_WIDTH: u32 = 154;
@@ -2810,7 +2907,7 @@ index 4c0ae87..7de1a20 100644
  
  const BACKGROUND: Rgb = Rgb {
      red: 0,
-@@ -35,6 +56,46 @@ const LABEL: Rgb = Rgb {
+@@ -35,6 +58,46 @@ const LABEL: Rgb = Rgb {
      green: 242,
      blue: 242,
  };
@@ -2857,7 +2954,7 @@ index 4c0ae87..7de1a20 100644
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  pub enum FunctionKey {
-@@ -60,13 +121,19 @@ pub enum StepDirection {
+@@ -60,13 +123,19 @@ pub enum StepDirection {
  
  /// Independently available default-renderer controls.
  #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2878,7 +2975,7 @@ index 4c0ae87..7de1a20 100644
  
      #[must_use]
      pub const fn contains(self, capability: Self) -> bool {
-@@ -82,14 +149,110 @@ impl std::ops::BitOr for StockCapabilities {
+@@ -82,14 +151,110 @@ impl std::ops::BitOr for StockCapabilities {
      }
  }
  
@@ -2992,7 +3089,7 @@ index 4c0ae87..7de1a20 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -103,6 +266,17 @@ pub enum StockAction {
+@@ -103,6 +268,18 @@ pub enum StockAction {
      MediaPrevious,
      MediaPlayPause,
      MediaNext,
@@ -3007,10 +3104,11 @@ index 4c0ae87..7de1a20 100644
 +    OpenShortcutTwo,
 +    OpenSystemMonitor,
 +    OpenPowerSettings,
++    ToggleAutoBrightness,
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -149,6 +323,13 @@ enum Control {
+@@ -149,6 +326,13 @@ enum Control {
      Mute,
      VolumeDown,
      VolumeUp,
@@ -3024,7 +3122,7 @@ index 4c0ae87..7de1a20 100644
  }
  
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -211,6 +392,100 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
+@@ -211,6 +395,100 @@ const NORMAL_CONTROLS: [NativeControl; 10] = [
      },
  ];
  
@@ -3125,25 +3223,27 @@ index 4c0ae87..7de1a20 100644
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
  struct LaidOutControl {
      control: Control,
-@@ -223,6 +498,8 @@ pub struct StockBar {
+@@ -223,6 +501,9 @@ pub struct StockBar {
      width: u32,
      height: u32,
      capabilities: StockCapabilities,
 +    open_slider: Option<SliderControl>,
 +    tools: bool,
++    auto_brightness: Option<bool>,
  }
  
  impl StockBar {
-@@ -241,6 +518,8 @@ impl StockBar {
+@@ -241,6 +522,9 @@ impl StockBar {
                  width,
                  height,
                  capabilities,
 +                open_slider: None,
 +                tools: false,
++                auto_brightness: None,
              })
          }
      }
-@@ -255,6 +534,43 @@ impl StockBar {
+@@ -255,6 +539,68 @@ impl StockBar {
          self.height
      }
  
@@ -3170,6 +3270,31 @@ index 4c0ae87..7de1a20 100644
 +        }
 +    }
 +
++    /// Makes the sun of the display slider an AUTO switch (`Some`), lit for
++    /// AUTO (`Some(true)`).
++    #[must_use]
++    pub const fn with_auto_brightness(mut self, state: Option<bool>) -> Self {
++        self.auto_brightness = state;
++        self
++    }
++
++    #[must_use]
++    pub const fn auto_brightness(self) -> Option<bool> {
++        self.auto_brightness
++    }
++
++    /// The sun at the left end of the display slider, up to its track.
++    fn auto_switch_bounds(self) -> Option<Rectangle> {
++        if self.auto_brightness.is_none()
++            || self.open_slider().is_some()
++            || self.active_slider() != Some(SliderControl::DisplayBrightness)
++        {
++            return None;
++        }
++        let bounds = self.native_control_bounds(MAIN_SLIDER_LEFT, AUTO_SWITCH_WIDTH);
++        (bounds.width != 0).then_some(bounds)
++    }
++
 +    #[must_use]
 +    pub const fn with_tools(mut self, open: bool) -> Self {
 +        self.tools = open;
@@ -3187,7 +3312,7 @@ index 4c0ae87..7de1a20 100644
      #[must_use]
      pub(crate) fn escape_right(self) -> u32 {
          let bounds = self.escape_bounds();
-@@ -290,10 +606,32 @@ impl StockBar {
+@@ -290,10 +636,32 @@ impl StockBar {
          }
          frame.clear(BACKGROUND);
          if fn_held {
@@ -3222,7 +3347,7 @@ index 4c0ae87..7de1a20 100644
      }
  
      /// Maps a completed tap to one currently visible action.
-@@ -302,7 +640,37 @@ impl StockBar {
+@@ -302,7 +670,37 @@ impl StockBar {
          let Gesture::Tap(contact) = gesture else {
              return None;
          };
@@ -3261,12 +3386,17 @@ index 4c0ae87..7de1a20 100644
      }
  
      /// Maps an active display contact to the control beneath it.
-@@ -319,29 +687,271 @@ impl StockBar {
+@@ -319,29 +717,289 @@ impl StockBar {
          if contains(self.escape_bounds(), x, y) {
              return Some(StockAction::Escape);
          }
 +        if self.tools_open() && contains(self.cpu_readout_bounds(), x, y) {
 +            return Some(StockAction::OpenSystemMonitor);
++        }
++        if let Some(bounds) = self.auto_switch_bounds()
++            && contains(bounds, x, y)
++        {
++            return Some(StockAction::ToggleAutoBrightness);
 +        }
 +        if self.battery_visible()
 +            && contains(
@@ -3290,6 +3420,12 @@ index 4c0ae87..7de1a20 100644
 +        let y = display_coordinate(contact.y());
 +        let control = self.active_slider()?;
 +        if !contains(self.slider_bounds(control)?, x, y) {
++            return None;
++        }
++        if self
++            .auto_switch_bounds()
++            .is_some_and(|bounds| contains(bounds, x, y))
++        {
 +            return None;
 +        }
 +        Some((control, self.slider_level(control, contact.x())?))
@@ -3457,7 +3593,14 @@ index 4c0ae87..7de1a20 100644
 +        if control != SliderControl::Volume {
 +            let icon = self.native_control_bounds(Self::slider_left(control) + 8, 72);
 +            if icon.width != 0 {
-+                stock_art::draw_symbol(frame, icon, control.symbol(false), LABEL)?;
++                let auto = (control == SliderControl::DisplayBrightness)
++                    .then_some(self.auto_brightness)
++                    .flatten();
++                let (symbol, color) = match auto {
++                    Some(true) => (Symbol::SunAuto, SLIDER_FILL),
++                    _ => (control.symbol(false), LABEL),
++                };
++                stock_art::draw_symbol(frame, icon, symbol, color)?;
 +            }
 +        }
 +        let track = self.slider_track(control);
@@ -3537,7 +3680,7 @@ index 4c0ae87..7de1a20 100644
          Ok(())
      }
  
-@@ -415,20 +1025,109 @@ impl StockBar {
+@@ -415,20 +1073,109 @@ impl StockBar {
      }
  
      fn normal_controls(self) -> Vec<LaidOutControl> {
@@ -3654,7 +3797,7 @@ index 4c0ae87..7de1a20 100644
      const fn control_available(self, control: Control) -> bool {
          match control {
              Control::DisplayDown | Control::DisplayUp => self
-@@ -443,18 +1142,41 @@ impl StockBar {
+@@ -443,18 +1190,41 @@ impl StockBar {
              Control::Mute | Control::VolumeDown | Control::VolumeUp => {
                  self.capabilities.contains(StockCapabilities::AUDIO)
              }
@@ -3701,7 +3844,7 @@ index 4c0ae87..7de1a20 100644
      }
  
      fn scaled_x(self, value: u32) -> u32 {
-@@ -491,6 +1213,16 @@ fn contains(bounds: Rectangle, x: u32, y: u32) -> bool {
+@@ -491,6 +1261,16 @@ fn contains(bounds: Rectangle, x: u32, y: u32) -> bool {
          && y < bounds.y.saturating_add(bounds.height)
  }
  
@@ -3718,7 +3861,7 @@ index 4c0ae87..7de1a20 100644
  const fn control_action(control: Control) -> StockAction {
      match control {
          Control::DisplayDown => StockAction::StepDisplayBrightness(StepDirection::Down),
-@@ -503,10 +1235,21 @@ const fn control_action(control: Control) -> StockAction {
+@@ -503,10 +1283,21 @@ const fn control_action(control: Control) -> StockAction {
          Control::Mute => StockAction::ToggleMute,
          Control::VolumeDown => StockAction::StepVolume(StepDirection::Down),
          Control::VolumeUp => StockAction::StepVolume(StepDirection::Up),
@@ -3741,7 +3884,7 @@ index 4c0ae87..7de1a20 100644
      match control {
          Control::DisplayDown => Symbol::DisplayDown,
          Control::DisplayUp => Symbol::DisplayUp,
-@@ -515,9 +1258,22 @@ const fn control_symbol(control: Control) -> Symbol {
+@@ -515,9 +1306,22 @@ const fn control_symbol(control: Control) -> Symbol {
          Control::MediaPrevious => Symbol::Previous,
          Control::MediaPlayPause => Symbol::PlayPause,
          Control::MediaNext => Symbol::Next,
@@ -3764,7 +3907,7 @@ index 4c0ae87..7de1a20 100644
      }
  }
  
-@@ -623,6 +1379,324 @@ mod tests {
+@@ -623,6 +1427,367 @@ mod tests {
          }
      }
  
@@ -3826,6 +3969,49 @@ index 4c0ae87..7de1a20 100644
 +        );
 +        assert_eq!(extended.action_at(contact(1_920.0), false), None);
 +        assert_eq!(extended.action_at(contact(1_920.0), true), None);
++    }
++
++    #[test]
++    fn display_sun_switches_auto_brightness_only_when_configured() {
++        let base = StockBar::new(
++            NATIVE_WIDTH,
++            NATIVE_HEIGHT,
++            all() | StockCapabilities::EXTENDED_CONTROLS,
++        )
++        .unwrap();
++        let contact = |x| DisplayContact::new(1, x, 30.0).unwrap();
++        let sun = f64::from(MAIN_SLIDER_LEFT + 40);
++        let track = f64::from(MAIN_SLIDER_LEFT + 300);
++
++        assert_eq!(base.auto_switch_bounds(), None);
++        assert!(base.slider_at(contact(sun)).is_some());
++        assert_ne!(
++            base.action_at(contact(sun), false),
++            Some(StockAction::ToggleAutoBrightness)
++        );
++
++        for state in [Some(true), Some(false)] {
++            let bar = base.with_auto_brightness(state);
++            assert!(bar.slider_at(contact(sun)).is_none());
++            assert_eq!(
++                bar.action_at(contact(sun), false),
++                Some(StockAction::ToggleAutoBrightness)
++            );
++            assert!(bar.slider_at(contact(track)).is_some());
++            assert_eq!(
++                bar.slider_bounds(SliderControl::DisplayBrightness),
++                base.slider_bounds(SliderControl::DisplayBrightness)
++            );
++            let switch = bar.auto_switch_bounds().unwrap();
++            assert!(switch.x + switch.width <= bar.slider_track(SliderControl::DisplayBrightness).x);
++        }
++
++        let open = base
++            .with_auto_brightness(Some(true))
++            .with_open_slider(Some(SliderControl::Volume));
++        assert_eq!(open.auto_switch_bounds(), None);
++        let tools = base.with_auto_brightness(Some(true)).with_tools(true);
++        assert_eq!(tools.auto_switch_bounds(), None);
 +    }
 +
 +    #[test]
@@ -4089,7 +4275,7 @@ index 4c0ae87..7de1a20 100644
      #[test]
      fn media_capability_loss_keeps_fixed_chrome_but_disables_actions() {
          let full = StockBar::new(NATIVE_WIDTH, NATIVE_HEIGHT, all()).unwrap();
-@@ -698,4 +1772,38 @@ mod tests {
+@@ -698,4 +1863,38 @@ mod tests {
          );
          assert_eq!(pixels, before);
      }

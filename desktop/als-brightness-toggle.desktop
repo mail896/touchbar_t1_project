@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Auto brightness on/off
-Name[de]=Auto-Helligkeit ein/aus
+Name=Auto brightness AUTO/manual
+Name[de]=Auto-Helligkeit AUTO/MANUELL
 GenericName=Automatic display brightness
 GenericName[de]=Automatische Bildschirmhelligkeit
-Comment=Turns brightness control by the light sensor on or off
-Comment[de]=Schaltet die Helligkeitsregelung nach dem Lichtsensor ein oder aus
+Comment=Switches brightness between AUTO (light sensor) and manual
+Comment[de]=Schaltet die Helligkeit zwischen AUTO (Lichtsensor) und MANUELL um
 Exec=sh -c '"$HOME/.local/bin/als-brightness-toggle"'
 Icon=video-display-brightness
 Terminal=false
@@ -14,11 +14,10 @@ Keywords=brightness;light sensor;display;Helligkeit;Lichtsensor;
 Actions=On;Off;
 
 [Desktop Action On]
-Name=Turn on
-Name[de]=Einschalten
+Name=AUTO
 Exec=sh -c '"$HOME/.local/bin/als-brightness-toggle" on'
 
 [Desktop Action Off]
-Name=Turn off
-Name[de]=Ausschalten
+Name=Manual
+Name[de]=MANUELL
 Exec=sh -c '"$HOME/.local/bin/als-brightness-toggle" off'

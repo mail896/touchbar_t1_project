@@ -253,22 +253,29 @@ The kernel then does the filtering. In rEFInd, `graphics on` in the
 
 The ambient light sensor sits behind the T1 as a HID sensor (`05AC:8600`).
 Debian loads `hid_sensor_als`, and `iio-sensor-proxy` reports it on D-Bus.
-Plasma 6.3 does not use it. `als-brightness` is a small user service that does:
+Plasma 6.3 does not use it. `als-brightness` is a small user service with two
+modes, kept in `~/.config/als-brightness.mode`:
 
-- It maps lux to percent on a logarithmic curve.
-- A manual change via the Touch Bar or the KDE slider is learned as an offset
-  to that curve (`~/.config/als-brightness.json`).
-- It brightens after about 1 s and darkens only after about 4 s.
-- It releases the sensor when the lid closes and before sleep.
+- **AUTO**: brightness follows the light along a logarithmic curve (flat below
+  about 5 lux, where the sensor is noisy). When AUTO is switched on, the current
+  brightness at the current light becomes the starting point. Nothing is
+  learned afterwards. It brightens after about 1 s and darkens after about 4 s,
+  and only once the light has changed noticeably.
+- **Manual**: the service does nothing and releases the sensor.
 
-It writes the backlight through logind (`Session.SetBrightness`), the same
-path the Touch Bar daemon uses. Writing through KDE (`org.kde.ScreenBrightness`)
-makes the screen twitch after every Touch Bar change: KDE does not notice the
-Touch Bar's write and animates from its stale value on its next write. KDE's
-own writes are recognised by the kernel value matching KDE's value: a profile
-switch is not learned, wake-up from idle dimming returns to the curve, and the
-KDE slider is learned. During KDE's idle dimming (one step to 0.3, keyboard
-backlight off) the service pauses.
+The sun at the left end of the Touch Bar brightness slider is the switch: lit
+blue for AUTO, white for manual. Moving the slider or using the brightness keys
+switches to manual. This needs the renderer from `renderer.patch`; without the
+mode file the sun stays a plain icon. The KDE slider also switches to manual.
+
+The service writes the backlight through logind (`Session.SetBrightness`), the
+same path the Touch Bar daemon uses. Writing through KDE
+(`org.kde.ScreenBrightness`) makes the screen twitch after every Touch Bar
+change: KDE does not notice the Touch Bar's write and animates from its stale
+value on its next write. KDE still writes its own stale value back on a profile
+switch between AC and battery and on wake-up from idle dimming; in AUTO the
+service restores the curve value within about 0.3 s. During KDE's idle dimming
+(one step to 0.3, keyboard backlight off) it pauses.
 
 Needs `python3-dbus`, `python3-gi` and `iio-sensor-proxy`:
 
@@ -281,8 +288,8 @@ systemctl --user enable --now als-brightness.service
 journalctl --user -u als-brightness -f
 ```
 
-For a menu entry that switches the service on and off (with a short
-notification; the choice survives reboots):
+A menu entry switches between AUTO and manual as well, with a short
+notification:
 
 ```bash
 install -D -m 0755 bin/als-brightness-toggle ~/.local/bin/als-brightness-toggle
@@ -290,11 +297,7 @@ install -D -m 0644 desktop/als-brightness-toggle.desktop \
   ~/.local/share/applications/als-brightness-toggle.desktop
 ```
 
-"Auto brightness on/off" can then be added to the panel or given a global
-shortcut. Right-click offers "Turn on" and "Turn off".
-
-On the first start the current brightness becomes the preference. Disable with
-`systemctl --user disable --now als-brightness.service`.
+Disable the service with `systemctl --user disable --now als-brightness.service`.
 
 Note: KDE's slider may show a different value than the real brightness, since
 neither the Touch Bar nor this service go through KDE.

@@ -1,31 +1,48 @@
 #!/bin/sh
-# Toggles automatic display brightness (als-brightness.service).
-# No argument: toggle. "on" / "off" / "status" explicitly.
-# The state survives reboots (enable/disable).
+# Switches automatic display brightness between AUTO and manual.
+# No argument: toggle. "on" (AUTO) / "off" (manual) / "status".
+# The mode lives in ~/.config/als-brightness.mode and is shared with the AUTO
+# switch on the Touch Bar. Switching AUTO on takes the current brightness at
+# the current light as its starting point.
 set -u
 SERVICE=als-brightness.service
+MODE="$HOME/.config/als-brightness.mode"
 
 notify() {
     notify-send -a "Auto brightness" -i "$1" -t 2500 "$2" "$3" 2>/dev/null || true
 }
 
+write() {
+    mkdir -p "$(dirname "$MODE")"
+    printf '%s\n' "$1" > "$MODE.new" && mv -f "$MODE.new" "$MODE"
+}
+
+current() {
+    if [ "$(cat "$MODE" 2>/dev/null)" = manual ]; then echo manual; else echo auto; fi
+}
+
 on() {
+    write auto
     systemctl --user enable --now "$SERVICE" >/dev/null 2>&1
-    notify brightness-high "Auto brightness on" \
-        "Brightness follows the ambient light."
+    notify brightness-high "Auto brightness: AUTO" \
+        "Brightness follows the light, starting from the current setting."
 }
 
 off() {
-    systemctl --user disable --now "$SERVICE" >/dev/null 2>&1
-    notify brightness-low "Auto brightness off" \
+    write manual
+    notify brightness-low "Auto brightness: manual" \
         "Brightness stays where it is."
 }
 
 case "${1:-toggle}" in
     on) on ;;
     off) off ;;
-    status) systemctl --user is-active "$SERVICE" ;;
+    status) current ;;
     *)
-        if systemctl --user is-active --quiet "$SERVICE"; then off; else on; fi
+        if [ "$(current)" = auto ] && systemctl --user is-active --quiet "$SERVICE"; then
+            off
+        else
+            on
+        fi
         ;;
 esac
