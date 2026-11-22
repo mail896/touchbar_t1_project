@@ -2,8 +2,8 @@
 # Switches automatic display brightness between AUTO and manual.
 # No argument: toggle. "on" (AUTO) / "off" (manual) / "status".
 # The mode lives in ~/.config/als-brightness.mode and is shared with the AUTO
-# switch on the Touch Bar. Switching AUTO on takes the current brightness at
-# the current light as its starting point.
+# switch on the Touch Bar. Switching AUTO on sets the brightness that suits
+# the current light right away.
 set -u
 SERVICE=als-brightness.service
 MODE="$HOME/.config/als-brightness.mode"
@@ -25,7 +25,7 @@ on() {
     write auto
     systemctl --user enable --now "$SERVICE" >/dev/null 2>&1
     notify brightness-high "Auto brightness: AUTO" \
-        "Brightness follows the light, starting from the current setting."
+        "Brightness follows the light."
 }
 
 off() {

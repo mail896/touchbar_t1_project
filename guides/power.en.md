@@ -257,10 +257,12 @@ Plasma 6.3 does not use it. `als-brightness` is a small user service with two
 modes, kept in `~/.config/als-brightness.mode`:
 
 - **AUTO**: brightness follows the light along a logarithmic curve (flat below
-  about 5 lux, where the sensor is noisy). When AUTO is switched on, the current
-  brightness at the current light becomes the starting point. Nothing is
-  learned afterwards. It brightens after about 1 s and darkens after about 4 s,
-  and only once the light has changed noticeably.
+  about 5 lux, where the sensor is noisy) plus a fixed offset, -5 percentage
+  points unless `~/.config/als-brightness.json` sets `"offset"`. Switching AUTO
+  on goes straight to the value that suits the light, whatever was set by hand
+  before; about 20 % in a dark room. Nothing is learned. It brightens after
+  about 1 s and darkens after about 4 s, and only once the light has changed
+  noticeably.
 - **Manual**: the service does nothing and releases the sensor.
 
 The sun at the left end of the Touch Bar brightness slider is the switch: lit

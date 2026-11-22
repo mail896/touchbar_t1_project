@@ -269,10 +269,12 @@ Plasma 6.3 nutzt ihn nicht. `als-brightness` ist ein kleiner Benutzerdienst mit
 zwei Modi, festgehalten in `~/.config/als-brightness.mode`:
 
 - **AUTO**: Die Helligkeit folgt dem Licht über eine logarithmische Kennlinie
-  (unter etwa 5 lux flach, dort rauscht der Sensor). Beim Einschalten von AUTO
-  gilt die gerade eingestellte Helligkeit beim aktuellen Licht als
-  Ausgangspunkt. Danach wird nichts gelernt. Heller regelt er nach etwa 1 s,
-  dunkler nach etwa 4 s, und nur bei deutlicher Lichtänderung.
+  (unter etwa 5 lux flach, dort rauscht der Sensor) plus einen festen Versatz,
+  −5 Prozentpunkte, sofern `~/.config/als-brightness.json` kein `"offset"`
+  setzt. Beim Einschalten von AUTO geht die Helligkeit sofort auf den zum Licht
+  passenden Wert, egal was vorher von Hand eingestellt war; im dunklen Raum
+  etwa 20 %. Gelernt wird nichts. Heller regelt er nach etwa 1 s, dunkler nach
+  etwa 4 s, und nur bei deutlicher Lichtänderung.
 - **Manuell**: Der Dienst tut nichts und gibt den Sensor frei.
 
 Die Sonne links im Helligkeitsregler der Touch Bar ist der Schalter: blau

@@ -5,9 +5,9 @@ Two modes, kept in ~/.config/als-brightness.mode ("auto" / "manual"). The
 file is shared by this service, the AUTO switch on the Touch Bar (the sun in
 front of the brightness slider of t1-touchbar-kde) and als-brightness-toggle.
 
-- AUTO: brightness follows the light along a fixed curve plus an offset. The
-  offset is set once when AUTO is switched on: the current brightness applies
-  at the current light. There is no continuous learning.
+- AUTO: brightness follows the light along a fixed curve plus a fixed offset
+  (state file, default -5). Switching AUTO on goes straight to the curve value;
+  the previous manual setting does not count. Nothing is learned.
 - Manual: the service does not adjust anything and releases the sensor.
 - Adjusting by hand (Touch Bar slider or keys, KDE slider) switches to manual.
   The Touch Bar renderer writes that itself; as a fallback the service treats
@@ -35,6 +35,7 @@ from gi.repository import GLib
 
 MODE_FILE = os.path.expanduser("~/.config/als-brightness.mode")
 STATE = os.path.expanduser("~/.config/als-brightness.json")
+DEFAULT_OFFSET = -5.0     # percentage points added to the curve unless stored
 # (log10(lux+1), percent)
 CURVE = [(0.0, 12.0), (1.0, 28.0), (2.0, 48.0), (3.0, 78.0), (3.6, 100.0)]
 MIN_PERCENT, MAX_PERCENT = 3.0, 100.0
@@ -137,7 +138,8 @@ class Controller:
         self.no_sensor_logged = False
         self.sleeping = False
         self.ticks = 0
-        self.calibrate = False
+        self.immediate = False    # after switching AUTO on, adjust without delay
+        self.fresh = False        # fresh light value since claiming the sensor
         self.mode = read_mode()
         if self.mode is None:
             self.mode = "auto"
@@ -192,16 +194,7 @@ class Controller:
             with open(STATE) as f:
                 return float(json.load(f)["offset"])
         except Exception:
-            return 0.0
-
-    def _save_offset(self):
-        try:
-            tmp = STATE + ".new"
-            with open(tmp, "w") as f:
-                json.dump({"offset": round(self.offset, 1)}, f)
-            os.replace(tmp, STATE)
-        except Exception as e:
-            log("Offset not saved:", e)
+            return DEFAULT_OFFSET
 
     def to_manual(self, reason):
         if self.mode == "manual":
@@ -218,7 +211,6 @@ class Controller:
                 self.claim()
         else:
             self.ramp = None
-            self.calibrate = False
             self.release("manual")
 
     def _check_mode_file(self):
@@ -228,7 +220,8 @@ class Controller:
         old, self.mode = self.mode, new
         log("Mode:", old, "->", new)
         if new == "auto":
-            self.calibrate = True     # current brightness at the current light
+            self.immediate = True     # go to the curve value right away
+            self.offset = self._load_offset()
         self._apply_mode()
 
     # ---- KDE brightness (read only) -------------------------------------
@@ -402,6 +395,7 @@ class Controller:
             self.rawx = None
             self.logx_applied = None
             self.deviating_for = 0
+            self.fresh = False        # only our own reading after 1 s counts
             log("Light sensor claimed")
             # Right after ClaimLight the proxy still reports an old value.
             GLib.timeout_add(1000, lambda: (self._read_light(), False)[1])
@@ -442,17 +436,10 @@ class Controller:
             return
         x = math.log10(max(0.0, float(changed["LightLevel"])) + 1.0)
         self.rawx = x
-        if self.logx is None:
-            self.logx = x
-        if self.calibrate and self.hw and iface is None:
-            self.calibrate = False
-            hw = 100.0 * self.read_hw() / self.hw_max
-            self.offset = max(-100.0, min(100.0, hw - curve(x)))
-            self._save_offset()
-            self.applied = hw
-            self.logx = x
-            self.logx_applied = x
-            log(f"AUTO from {hw:.0f} % at {10**x - 1:.0f} lux -> offset {self.offset:+.1f}")
+        if self.logx is None or iface is None:
+            self.logx = x             # our own reading is fresh, restart smoothing
+        if iface is None:
+            self.fresh = True
 
     def _proxy_owner(self, name, old, new):
         self.active = False
@@ -517,7 +504,19 @@ class Controller:
         return max(MIN_PERCENT, min(MAX_PERCENT, curve(self.logx) + self.offset))
 
     def _control(self):
-        if self.mode != "auto" or not self.active or self.logx is None or self.calibrate:
+        if self.mode != "auto" or not self.active or self.logx is None:
+            return
+        if self.immediate and self.fresh and self.hw:
+            # AUTO switched on: go to the curve value once a fresh value is in
+            self.immediate = False
+            hw = self.read_hw()
+            target = self._target()
+            self._adopt(hw)
+            self.logx_applied = self.logx
+            log(f"AUTO: {100.0 * hw / self.hw_max:.0f} % -> {target:.0f} % "
+                f"at {10**self.logx - 1:.0f} lux")
+            if abs(target - self.applied) >= 1.0:
+                self._start_ramp(self.applied, target)
             return
         d = self.rawx - self.logx
         self.logx += (EMA_UP if d > 0 else EMA_DOWN) * d
