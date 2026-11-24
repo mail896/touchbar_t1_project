@@ -9,6 +9,11 @@ tag=macbook-s2idle-powersave
 config=/etc/macbook-s2idle-powersave.conf
 state=/run/macbook-s2idle-powersave
 disabled=/etc/macbook-s2idle-powersave.disabled
+# Sleep brake: when s2idle fails at brcmfmac (the firmware does not answer the
+# D3 request), post records it here. The next attempt then unbinds WLAN for
+# that sleep, and post binds it again with fresh firmware. Without this,
+# logind retried every 25 s for a whole night.
+wifi_fail=/run/macbook-s2idle-wifi-failed
 
 log()
 {
@@ -273,6 +278,7 @@ case ${1:-} in
         rm -rf "$state"
         mkdir -p "$state"
         snapshot pre
+        cat /sys/power/suspend_stats/fail > "$state/suspend-fail-pre" 2>/dev/null || true
         log "pre-s2idle power save begins (mode=$mode)"
 
         if [ "$mode" = wifi ] && [ "${THUNDERBOLT_L1:-0}" = 1 ]; then
@@ -295,7 +301,10 @@ case ${1:-} in
         # protection enabled. Preserve the previous fallback and full mode.
         case "$mode" in
             wifi|full)
-                if [ "$mode" = wifi ] && [ "${WIFI_KEEP_BOUND:-0}" = 1 ] &&
+                if [ -e "$wifi_fail" ] && [ "${WIFI_FAIL_RESET:-1}" = 1 ]; then
+                    log "WLAN: last sleep failed at brcmfmac, unbinding WLAN for this sleep"
+                    unbind_if_bound 0000:02:00.0 brcmfmac
+                elif [ "$mode" = wifi ] && [ "${WIFI_KEEP_BOUND:-0}" = 1 ] &&
                     [ "$(cat /sys/module/brcmfmac/parameters/mbp142_s2idle_keep_d0 2>/dev/null)" = Y ]; then
                     log "WLAN stays bound for firmware suspend with D0 protection"
                 else
@@ -360,6 +369,19 @@ case ${1:-} in
             log "keyboard backlight restored"
         fi
         snapshot post
+        fail_pre=$(cat "$state/suspend-fail-pre" 2>/dev/null || echo)
+        fail_now=$(cat /sys/power/suspend_stats/fail 2>/dev/null || echo)
+        if [ -n "$fail_pre" ] && [ -n "$fail_now" ] && [ "$fail_now" -gt "$fail_pre" ] 2>/dev/null; then
+            failed_dev=$(cat /sys/power/suspend_stats/last_failed_dev 2>/dev/null)
+            log "s2idle failed at ${failed_dev:-unknown} ($(cat /sys/power/suspend_stats/last_failed_step 2>/dev/null), errno $(cat /sys/power/suspend_stats/last_failed_errno 2>/dev/null))"
+            if [ "$failed_dev" = 0000:02:00.0 ]; then
+                : > "$wifi_fail"
+                log "WLAN brake set: next sleep without bound WLAN"
+            fi
+        elif [ -e "$wifi_fail" ]; then
+            rm -f "$wifi_fail"
+            log "WLAN brake cleared: sleep succeeded, WLAN bound again"
+        fi
         log "post-s2idle restore complete"
         ;;
 esac

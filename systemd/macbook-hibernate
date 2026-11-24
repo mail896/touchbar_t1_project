@@ -8,6 +8,10 @@
 # T1:   Like macOS, send ASOC.SOCW(0) before and SOCW(1) after hibernation and
 #   restart the T1Bridge services. Linux runs _PTS/_WAK for S4, which report the
 #   sleep state to the EC; without SOCW(1) the Touch Bar and Touch ID stay dark.
+# Bluetooth: unbind the UART controller (hci_uart_bcm, serial1-0) before S4 and
+#   bind it again afterwards. Otherwise the BCM20703 answers every HCI command
+#   with "Command Disallowed" after resume and no device can connect. Then
+#   reapply Tether's class of device. Switch: BT_HIBERNATE_RESET (default 1).
 # s2idle is handled by the macbook-s2idle-powersave hook.
 set -u
 
@@ -17,8 +21,30 @@ drv=/sys/bus/pci/drivers/brcmfmac
 mark=/run/macbook-hibernate-wlan.unbound
 socw_mod=/usr/local/lib/macbook/$(uname -r)/mbp142_t1_socw.ko
 socw=/sys/module/mbp142_t1_socw/parameters/socw
+bt=serial1-0
+btdrv=/sys/bus/serial/drivers/hci_uart_bcm
+btmark=/run/macbook-hibernate-bt.unbound
 
 log() { logger -t "$tag" -- "$*"; }
+
+bt_reset_enabled() {
+    value=1
+    if [ -r /etc/macbook-s2idle-powersave.conf ]; then
+        # shellcheck disable=SC1091
+        value=$(. /etc/macbook-s2idle-powersave.conf; echo "${BT_HIBERNATE_RESET:-1}")
+    fi
+    [ "$value" = 1 ]
+}
+
+bt_bind() {
+    if [ ! -e "$btdrv/$bt" ] && printf %s "$bt" > "$btdrv/bind"; then
+        log "Bluetooth bound again after $action"
+    else
+        log "Bluetooth could not be bound after $action"
+    fi
+    # Binding resets the class of device to Computer; Tether needs Hands-Free.
+    systemctl --no-block try-restart 'tether-btclass@hci0.service' 2>/dev/null
+}
 
 [ "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" = MacBookPro14,2 ] || exit 0
 action=${SYSTEMD_SLEEP_ACTION:-${2:-}}
@@ -58,6 +84,14 @@ case "${1:-}" in
                 log "WLAN could not be unbound before $action"
             fi
         fi
+        if bt_reset_enabled && [ -e "$btdrv/$bt" ]; then
+            if printf %s "$bt" > "$btdrv/unbind"; then
+                : > "$btmark"
+                log "Bluetooth unbound before $action"
+            else
+                log "Bluetooth could not be unbound before $action"
+            fi
+        fi
         # Stop the keybag relay cleanly instead of letting it fail on the T1
         # connection that drops during resume. t1_wake starts it again.
         systemctl stop t1bridge-keybag.service 2>/dev/null
@@ -78,6 +112,15 @@ case "${1:-}" in
                     log "WLAN could not be bound after $action"
                 fi
             fi
+        fi
+        if [ -e "$btmark" ]; then
+            rm -f "$btmark"
+            bt_bind
+        elif bt_reset_enabled && [ -e "$btdrv/$bt" ]; then
+            # Unbinding before S4 failed: reset the controller once now.
+            printf %s "$bt" > "$btdrv/unbind" 2>/dev/null
+            sleep 1
+            bt_bind
         fi
         t1_wake
         ;;

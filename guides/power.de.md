@@ -59,6 +59,16 @@ sudo macbook-s2idle-recover
 Globale Optionen wie `pcie_aspm=force`, erzwungenes NVMe-D3cold oder S3/deep
 gehören nicht zu diesem Stand.
 
+### Schlaf-Bremse
+
+Verweigert die WLAN-Firmware nach einem langen Schlaf die D3-Anfrage
+(`brcmf_pcie_pm_enter_D3: Timeout`), scheitert jeder Schlafversuch mit -5,
+und logind versucht es alle 25 s erneut, im beobachteten Fall die ganze
+Nacht. Der Hook merkt sich ein Scheitern an `0000:02:00.0` in
+`/run/macbook-s2idle-wifi-failed`. Beim nächsten Versuch löst er das WLAN für
+diesen Schlaf vom Treiber, danach bindet er es mit frischer Firmware neu an.
+Ein gelungener Schlaf hebt die Marke auf. Schalter: `WIFI_FAIL_RESET=1`.
+
 ## Thunderbolt-Controller abschalten
 
 macOS schaltet beide Alpine-Ridge-Controller stromlos, solange an ihrer Seite
@@ -192,6 +202,13 @@ zurück, schickt `SOCW(1)` und startet die T1Bridge-Dienste neu. Mit
 `HibernateMode=shutdown` schaltet der Rechner nach dem Speichern ganz aus.
 Gemessen: höchstens etwa 0,4 W im Ruhezustand (vorher 1,3 W ohne diese
 Schritte).
+
+Bluetooth: Nach S4 lehnte der UART-Chip (BCM20703, `hci_uart_bcm`) jeden
+HCI-Befehl mit „Command Disallowed“ ab (Kernel: `Opcode … failed: -16`). Maus
+und Telefon verbanden sich nicht mehr, und Aus- und Einschalten des Adapters
+half nicht. Darum löst der Hook `serial1-0` vor dem Ruhezustand vom Treiber
+und bindet es danach neu an. Anschließend setzt er die Gerätklasse von Tether
+neu (`tether-btclass@hci0`). Schalter: `BT_HIBERNATE_RESET=1`.
 
 Voraussetzungen sind eine Swapdatei und `resume=`/`resume_offset=` auf der
 Kernel-Befehlszeile:
