@@ -55,7 +55,7 @@ DIM_FACTOR = 0.3
 KEYBOARD = "/sys/class/leds/spi::kbd_backlight/brightness"
 # Panel state as used by the Touch Bar provider. When the screen goes off without
 # KDE dimming (e.g. Esc on the lock screen) the keyboard backlight would stay on.
-PANEL_DPMS = "/sys/class/drm/card0-eDP-1/dpms"
+PANEL_DPMS = "/sys/class/drm/card*-eDP-*/dpms"
 QUIET_AFTER_SET = 0.5     # s, do not check the kernel value right after our write
 KDE_WINDOW = 3.0          # s after a KDE signal/profile switch: no manual change
 PROFILE_WINDOW = 3.0      # s, KDE profile switch
@@ -316,9 +316,9 @@ class Controller:
         """Keyboard backlight follows the panel: off with the screen, restored
         afterwards, but only if nobody else changed it in the meantime."""
         try:
-            on = open(PANEL_DPMS).read().strip() == "On"
+            on = open(sorted(glob.glob(PANEL_DPMS))[0]).read().strip() == "On"
             kbd = int(open(KEYBOARD).read())
-        except (OSError, ValueError):
+        except (OSError, ValueError, IndexError):
             return
         if on == self.panel_on or self.sleeping:
             return
