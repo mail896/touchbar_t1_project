@@ -53,6 +53,9 @@ HW_POLL_MS = 200          # sampling of the kernel value
 # the hardware value, KDE's value stays; keyboard backlight goes to 0.
 DIM_FACTOR = 0.3
 KEYBOARD = "/sys/class/leds/spi::kbd_backlight/brightness"
+# Panel state as used by the Touch Bar provider. When the screen goes off without
+# KDE dimming (e.g. Esc on the lock screen) the keyboard backlight would stay on.
+PANEL_DPMS = "/sys/class/drm/card0-eDP-1/dpms"
 QUIET_AFTER_SET = 0.5     # s, do not check the kernel value right after our write
 KDE_WINDOW = 3.0          # s after a KDE signal/profile switch: no manual change
 PROFILE_WINDOW = 3.0      # s, KDE profile switch
@@ -140,6 +143,8 @@ class Controller:
         self.ticks = 0
         self.immediate = False    # after switching AUTO on, adjust without delay
         self.fresh = False        # fresh light value since claiming the sensor
+        self.panel_on = True
+        self.saved_keyboard = None  # keyboard backlight saved before screen off
         self.mode = read_mode()
         if self.mode is None:
             self.mode = "auto"
@@ -301,6 +306,33 @@ class Controller:
             return int(open(KEYBOARD).read()) == 0
         except OSError:
             return True
+
+    def _set_keyboard(self, value):
+        self.session().SetBrightness(
+            "leds", os.path.basename(os.path.dirname(KEYBOARD)), dbus.UInt32(value),
+            dbus_interface="org.freedesktop.login1.Session")
+
+    def _check_panel(self):
+        """Keyboard backlight follows the panel: off with the screen, restored
+        afterwards, but only if nobody else changed it in the meantime."""
+        try:
+            on = open(PANEL_DPMS).read().strip() == "On"
+            kbd = int(open(KEYBOARD).read())
+        except (OSError, ValueError):
+            return
+        if on == self.panel_on or self.sleeping:
+            return
+        self.panel_on = on
+        if not on:
+            if kbd > 0:
+                self.saved_keyboard = kbd
+                self._set_keyboard(0)
+                log("screen off: keyboard backlight off (was", kbd, ")")
+        elif self.saved_keyboard is not None:
+            if kbd == 0:
+                self._set_keyboard(self.saved_keyboard)
+                log("screen on: keyboard backlight back to", self.saved_keyboard)
+            self.saved_keyboard = None
 
     def _hw_tick(self):
         try:
@@ -481,6 +513,7 @@ class Controller:
         self.ticks += 1
         try:
             self._check_mode_file()
+            self._check_panel()
             if self.active and self.rawx is None:
                 self._read_light()
             if self.ticks % 10 == 0:

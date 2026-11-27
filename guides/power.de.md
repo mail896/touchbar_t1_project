@@ -307,7 +307,10 @@ Touch-Bar-Wert nicht und animiert beim nächsten Setzen von seinem veralteten
 Wert aus. Seinen alten Wert schreibt KDE trotzdem selbst zurück, beim
 Profilwechsel zwischen Netzteil und Akku und beim Aufwachen aus dem Abdunkeln;
 in AUTO stellt der Dienst dann binnen etwa 0,3 s den Kennlinienwert wieder her.
-Während KDE abdunkelt (ein Schritt auf 0,3, Tastaturlicht aus), ruht er.
+Während KDE abdunkelt (ein Schritt auf 0,3, Tastaturlicht aus), ruht er. Geht das
+Panel ohne Abdunkeln aus, etwa mit Esc auf dem Sperrbildschirm, schaltet der
+Dienst auch das Tastaturlicht aus und stellt es wieder her, sobald das Panel
+zurückkommt, außer es wurde inzwischen anders geändert.
 
 Benötigt `python3-dbus`, `python3-gi` und `iio-sensor-proxy`:
 

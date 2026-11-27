@@ -294,7 +294,10 @@ change: KDE does not notice the Touch Bar's write and animates from its stale
 value on its next write. KDE still writes its own stale value back on a profile
 switch between AC and battery and on wake-up from idle dimming; in AUTO the
 service restores the curve value within about 0.3 s. During KDE's idle dimming
-(one step to 0.3, keyboard backlight off) it pauses.
+(one step to 0.3, keyboard backlight off) it pauses. When the panel goes off
+without dimming, for example with Esc on the lock screen, the service turns the
+keyboard backlight off as well and restores it when the panel comes back,
+unless something else changed it in between.
 
 Needs `python3-dbus`, `python3-gi` and `iio-sensor-proxy`:
 
