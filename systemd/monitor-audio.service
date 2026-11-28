@@ -1,0 +1,12 @@
+[Unit]
+Description=Route audio to the external monitor (DP) while it is connected
+After=pipewire-pulse.service wireplumber.service
+Wants=pipewire-pulse.service
+
+[Service]
+ExecStart=%h/.local/bin/monitor-audio
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

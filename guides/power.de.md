@@ -88,6 +88,22 @@ Controller dann ein und startet den Chipsatz-Port kurz neu, sodass das Gerät
 mit vollem Tempo ankommt. Ein USB-C-Monitor ohne USB-Gerät wird so nicht
 erkannt: `sudo macbook-tb-awake on`.
 
+Ist ein Bildschirm an DP angeschlossen, bleiben beide Seiten an. Der Hub in
+einem USB-C-Monitor ist oft reines USB 2 und bleibt auch bei eingeschaltetem
+Controller am Chipsatz-Port. Nachdem ein Bildschirm erkannt wurde, hält darum
+auch ein Gerät am Chipsatz-Port einer Seite diese Seite an (sonst ist das Bild
+nach 40 s weg, auch im Monitor-Standby). Ohne Bildschirm laufen USB-2-Geräte
+weiter am Chipsatz, und der Controller geht aus. Der Chipsatz-Port wird nur für
+USB-3-Geräte neu gestartet; bei einem USB-2-Hub meldete sich sonst alles
+dahinter doppelt an.
+
+Interner Codec und DP-Audio hängen an derselben Karte, und PipeWire bevorzugt
+das analoge Profil, daher werden Monitor-Lautsprecher nie angeboten. Der
+Benutzerdienst `monitor-audio` (`bin/monitor-audio`,
+`systemd/monitor-audio.service`, nach `~/.local/bin` und
+`~/.config/systemd/user`) schaltet Profil und Standardausgabe auf DP, solange ein
+Monitor angeschlossen ist, und danach zurück.
+
 Messung auf Akku (1 h): 1,36 W statt 2,56 W im Schlaf.
 
 Wach im Leerlauf mit ausgeschaltetem Bildschirm braucht das Gerät auf Akku

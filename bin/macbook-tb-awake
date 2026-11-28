@@ -10,8 +10,10 @@
 # With a controller powered off, the USB 2 lines of its USB-C ports are routed
 # to the PCH xHCI (ports 6-9), so USB devices keep working at USB 2 speed.
 # After powering on, the PCH port is cycled once so that the device
-# re-enumerates on the Alpine Ridge xHCI at full speed. USB-C monitors without
-# a USB device are not detected this way: use "on".
+# re-enumerates on the Alpine Ridge xHCI at full speed (USB 3 devices only).
+# USB-C monitors without a USB device are not detected this way: use "on".
+# Once a display is connected on DP, both sides stay on, and afterwards the
+# monitor's USB 2 hub on the PCH port keeps its side on as well.
 #
 # THUNDERBOLT_AWAKE_L1=1: enable ASPM L1 on the root port and the Alpine Ridge
 # bridge of every powered side. The firmware leaves ASPM disabled and Linux
@@ -25,6 +27,7 @@ tag=macbook-tb-awake
 config=/etc/macbook-s2idle-powersave.conf
 param=/sys/module/mbp142_tb_poweroff/parameters/awake
 hold=/run/macbook-tb-awake.hold    # present: never power off automatically
+monitor_mark=/run/macbook-tb-awake.monitor  # external display seen
 idle_checks=2                      # empty checks before powering off
 interval=20
 
@@ -111,6 +114,34 @@ branch_busy() {
         case ${bb_r##*/} in *-0) continue ;; esac
         case $(readlink -f "$bb_r") in "$bb_n"/*) return 0 ;; esac
     done
+    # External display on DP (side unknown: keep both sides on). Once one
+    # has been seen, a marker is set. While it exists, a USB 2-only device on
+    # the PCH port of the side (the hub inside the monitor; left 6, right 7,
+    # 8/9 both) also counts as busy, so the display survives monitor standby.
+    # Without a display the old behaviour applies: USB 2 devices stay on the
+    # PCH and the controller powers off. The marker is removed when ports
+    # 6-9 are empty.
+    for bb_c in /sys/class/drm/card*-DP-*/status; do
+        [ -r "$bb_c" ] || continue
+        if [ "$(cat "$bb_c")" = connected ]; then
+            [ -e "$monitor_mark" ] || { : > "$monitor_mark"; log "external display detected, keeping Thunderbolt on"; }
+            return 0
+        fi
+    done
+    if [ -e "$monitor_mark" ]; then
+        bb_any=0
+        for bb_p in 6 7 8 9; do
+            [ -e "/sys/bus/usb/devices/1-$bb_p" ] && bb_any=1
+        done
+        if [ "$bb_any" = 0 ]; then
+            rm -f "$monitor_mark"; log "display marker removed (nothing left on ports 6-9)"
+            return 1
+        fi
+        case $1 in RP05) bb_ports="6 8 9" ;; RP09) bb_ports="7 8 9" ;; esac
+        for bb_p in $bb_ports; do
+            [ -e "/sys/bus/usb/devices/1-$bb_p" ] && return 0
+        done
+    fi
     return 1
 }
 
@@ -144,10 +175,21 @@ case ${1:-status} in
         printf on > "$param" || exit 0
         wait_bound || log "xHCI not bound after power-on"
         p=/sys/bus/usb/devices/usb1/1-0:1.0/usb1-port$port
-        if [ -w "$p/disable" ]; then
-            printf 1 > "$p/disable"; sleep 1; printf 0 > "$p/disable"
-        fi
-        log "device on PCH port $port: Thunderbolt powered on, port cycled"
+        # USB 2-only devices (bcdUSB < 3, e.g. the hub inside a monitor) stay
+        # on the PCH anyway: do not cycle the port, otherwise every device
+        # behind it enumerates twice.
+        pl_ver=$(cat "/sys/bus/usb/devices/1-$port/version" 2>/dev/null | tr -d ' ')
+        case $pl_ver in
+            1.*|2.*)
+                log "device on PCH port $port (USB $pl_ver): Thunderbolt powered on, port not cycled"
+                ;;
+            *)
+                if [ -w "$p/disable" ]; then
+                    printf 1 > "$p/disable"; sleep 1; printf 0 > "$p/disable"
+                fi
+                log "device on PCH port $port: Thunderbolt powered on, port cycled"
+                ;;
+        esac
         l1_update
         ;;
     idle)

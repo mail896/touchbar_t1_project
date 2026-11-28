@@ -83,6 +83,20 @@ immediately at USB 2 speed. The udev rule then powers the controller on and
 cycles the PCH port once so the device re-enumerates at full speed. A USB-C
 monitor without a USB device is not detected this way: `sudo macbook-tb-awake on`.
 
+Once a display is connected on DP, both sides stay on. The hub inside a USB-C
+monitor is often USB 2 only; it stays on the PCH port even with the controller
+on, so after a display has been seen, a device on the PCH port of a side also
+keeps that side on (otherwise the picture is lost after 40 s, including during
+monitor standby). Without a display, USB 2 devices keep running on the PCH and
+the controller still powers off. The PCH port is only cycled for USB 3 devices;
+cycling a USB 2 hub would just enumerate everything behind it twice.
+
+The internal codec and DP audio share one card, and PipeWire prefers the
+analog profile, so a monitor's speakers are never offered. The user service
+`monitor-audio` (`bin/monitor-audio`, `systemd/monitor-audio.service`, install
+to `~/.local/bin` and `~/.config/systemd/user`) switches the card profile and
+default sink to DP while a monitor is connected and back afterwards.
+
 Battery measurement (1 h): 1.36 W instead of 2.56 W during sleep.
 
 Awake and idle with the display off, both sides off draw 3.7 W on battery,

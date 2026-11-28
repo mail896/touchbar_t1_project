@@ -1,0 +1,40 @@
+#!/bin/sh
+# MacBookPro14,2: route audio to an external monitor (DP audio) while it is
+# connected, and back to the internal speakers once it is unplugged.
+# Internal codec and DP audio share one card (HDA Intel PCH) and PipeWire
+# prefers the analog profile, so the monitor is never offered on its own.
+# Switching happens only when the monitor appears or disappears; a manual
+# choice in between is kept.
+set -u
+card=alsa_card.pci-0000_00_1f.3
+p_hdmi=output:hdmi-stereo+input:analog-stereo
+p_ana=output:analog-stereo+input:analog-stereo
+s_hdmi=alsa_output.pci-0000_00_1f.3.hdmi-stereo
+s_ana=alsa_output.pci-0000_00_1f.3.analog-stereo
+log() { logger -t monitor-audio -- "$*"; }
+
+hdmi_present() {
+    pactl list cards 2>/dev/null | awk -v c="$card" -v p="$p_hdmi" '
+        $1=="Name:" {in_c = ($2==c)}
+        in_c && $1==p":" {print (/available: yes/ ? 1 : 0); exit}'
+}
+
+check() {
+    now=$(hdmi_present); [ -n "$now" ] || return 0
+    [ "$now" = "$last" ] && return 0
+    last=$now
+    if [ "$now" = 1 ]; then
+        pactl set-card-profile "$card" "$p_hdmi" && sleep 0.5 &&
+            pactl set-default-sink "$s_hdmi" && log "monitor connected: audio over DP"
+    else
+        pactl set-card-profile "$card" "$p_ana" && sleep 0.5 &&
+            pactl set-default-sink "$s_ana" && log "monitor gone: internal audio"
+    fi
+}
+
+last=
+# At start, only switch to DP if the monitor is present; otherwise change nothing.
+[ "$(hdmi_present)" = 1 ] && check || last=0
+pactl subscribe | while read -r line; do
+    case $line in *" on card "*) check ;; esac
+done
